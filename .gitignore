@@ -1,0 +1,15 @@
+# Build output (regenerable via tools/build_patch.sh)
+build/
+
+# Disassembly output (regenerable via tools/disasm_pack.py)
+208_source/modules/
+208_source/dragon/
+208_source/index.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
