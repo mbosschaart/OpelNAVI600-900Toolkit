@@ -1,0 +1,160 @@
+{
+  "class": 32,
+  "machine": 8,
+  "entry": 4416,
+  "phoff": 52,
+  "shoff": 3989908,
+  "flags": 815276033,
+  "shnum": 17,
+  "shstrndx": 16,
+  "sections": [
+    {
+      "name": "",
+      "type": 0,
+      "addr": 0,
+      "offset": 0,
+      "size": 0
+    },
+    {
+      "name": ".reginfo",
+      "type": 1879048198,
+      "addr": 4096,
+      "offset": 3987660,
+      "size": 24
+    },
+    {
+      "name": ".init",
+      "type": 1,
+      "addr": 4120,
+      "offset": 4120,
+      "size": 52
+    },
+    {
+      "name": ".text",
+      "type": 1,
+      "addr": 4176,
+      "offset": 4176,
+      "size": 3016872
+    },
+    {
+      "name": ".fini",
+      "type": 1,
+      "addr": 3021048,
+      "offset": 3021048,
+      "size": 36
+    },
+    {
+      "name": ".rodata",
+      "type": 1,
+      "addr": 134217728,
+      "offset": 3022848,
+      "size": 647608
+    },
+    {
+      "name": ".eh_frame",
+      "type": 1,
+      "addr": 134869432,
+      "offset": 3670456,
+      "size": 284900
+    },
+    {
+      "name": ".gcc_except_table",
+      "type": 1,
+      "addr": 135154332,
+      "offset": 3955356,
+      "size": 25404
+    },
+    {
+      "name": ".ctors",
+      "type": 1,
+      "addr": 135179744,
+      "offset": 3980768,
+      "size": 24
+    },
+    {
+      "name": ".dtors",
+      "type": 1,
+      "addr": 135179768,
+      "offset": 3980792,
+      "size": 16
+    },
+    {
+      "name": ".jcr",
+      "type": 1,
+      "addr": 135179784,
+      "offset": 3980808,
+      "size": 4
+    },
+    {
+      "name": ".data",
+      "type": 1,
+      "addr": 135179792,
+      "offset": 3980816,
+      "size": 6832
+    },
+    {
+      "name": ".sdata",
+      "type": 1,
+      "addr": 135186624,
+      "offset": 3987648,
+      "size": 12
+    },
+    {
+      "name": ".sbss",
+      "type": 8,
+      "addr": 135186636,
+      "offset": 3987660,
+      "size": 88
+    },
+    {
+      "name": ".bss",
+      "type": 8,
+      "addr": 135186728,
+      "offset": 3987660,
+      "size": 89508
+    },
+    {
+      "name": ".ident",
+      "type": 1,
+      "addr": 0,
+      "offset": 3987684,
+      "size": 2097
+    },
+    {
+      "name": ".shstrtab",
+      "type": 3,
+      "addr": 0,
+      "offset": 3989781,
+      "size": 124
+    }
+  ],
+  "segments": [
+    {
+      "type": 1,
+      "offset": 4120,
+      "vaddr": 4120,
+      "filesz": 3016964,
+      "memsz": 3016964,
+      "flags": 5
+    },
+    {
+      "type": 1,
+      "offset": 3022848,
+      "vaddr": 134217728,
+      "filesz": 647608,
+      "memsz": 647608,
+      "flags": 4
+    },
+    {
+      "type": 1,
+      "offset": 3670456,
+      "vaddr": 134869432,
+      "filesz": 317204,
+      "memsz": 406804,
+      "flags": 6
+    }
+  ],
+  "text_offset": 4176,
+  "text_vaddr": 4176,
+  "text_size": 3016872
+}

@@ -1,0 +1,103 @@
+{
+  "class": 32,
+  "machine": 8,
+  "entry": 1048816,
+  "phoff": 52,
+  "shoff": 327188,
+  "flags": 815276033,
+  "shnum": 10,
+  "shstrndx": 7,
+  "sections": [
+    {
+      "name": "",
+      "type": 0,
+      "addr": 0,
+      "offset": 0,
+      "size": 0
+    },
+    {
+      "name": ".text",
+      "type": 1,
+      "addr": 1048576,
+      "offset": 4096,
+      "size": 316136
+    },
+    {
+      "name": ".rel.text",
+      "type": 9,
+      "addr": 0,
+      "offset": 359448,
+      "size": 93144
+    },
+    {
+      "name": ".data",
+      "type": 1,
+      "addr": 1368064,
+      "offset": 323584,
+      "size": 3516
+    },
+    {
+      "name": ".rel.data",
+      "type": 9,
+      "addr": 0,
+      "offset": 452592,
+      "size": 1472
+    },
+    {
+      "name": ".bss",
+      "type": 8,
+      "addr": 1371584,
+      "offset": 327100,
+      "size": 170212
+    },
+    {
+      "name": ".reginfo",
+      "type": 1879048198,
+      "addr": 0,
+      "offset": 327100,
+      "size": 24
+    },
+    {
+      "name": ".shstrtab",
+      "type": 3,
+      "addr": 0,
+      "offset": 327124,
+      "size": 61
+    },
+    {
+      "name": ".symtab",
+      "type": 2,
+      "addr": 0,
+      "offset": 327588,
+      "size": 14304
+    },
+    {
+      "name": ".strtab",
+      "type": 3,
+      "addr": 0,
+      "offset": 341892,
+      "size": 17553
+    }
+  ],
+  "segments": [
+    {
+      "type": 1,
+      "offset": 4096,
+      "vaddr": 1048576,
+      "filesz": 316136,
+      "memsz": 316136,
+      "flags": 5
+    },
+    {
+      "type": 1,
+      "offset": 323584,
+      "vaddr": 1368064,
+      "filesz": 3516,
+      "memsz": 173732,
+      "flags": 6
+    }
+  ],
+  "text_offset": 4096,
+  "text_vaddr": 1048576,
+  "text_size": 316136
+}

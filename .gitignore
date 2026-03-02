@@ -1,9 +1,7 @@
 # Build output (regenerable via tools/build_patch.sh)
 build/
 
-# Disassembly output (regenerable via tools/disasm_pack.py)
-208_source/modules/
-208_source/dragon/
+# Disassembly index (regenerable via tools/disasm_pack.py)
 208_source/index.json
 
 # Python
