@@ -63,9 +63,6 @@ This toolkit cracks that format open.
 │   │   └── dragon.asm             Bootloader disassembly (MIPS64)
 │   └── index.json                 Master index with metadata for all modules
 │
-├── ProcHMI_patched.out            Patched ProcHMI (iPod auth retry) — ready to deploy
-├── sysprogosalio_patched.out      Patched sysprogosalio (SD CID bypass) — ready to deploy
-│
 └── carbon_stripe/                 Custom UI skin assets
 ```
 
@@ -79,8 +76,6 @@ generated or proprietary files are `.gitignore`'d:
 | `tools/` | Yes | All Python tools, shell scripts, docs |
 | `208_source/MODULES.md` | Yes | Module reference documentation |
 | `208_source/modules/`, `dragon/` | No | Regenerable: `python3 tools/disasm_pack.py` |
-| `ProcHMI_patched.out` | No | Regenerable via patch workflow above |
-| `sysprogosalio_patched.out` | No | Regenerable via patch workflow above |
 | `Original Firmware Isos/` | No | Proprietary, obtain separately |
 | `Patched Firmware Isos/` | No | Regenerable via ISO build workflow above |
 | `carbon_stripe/` | Your call | Custom assets |
