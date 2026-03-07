@@ -26,12 +26,25 @@ This toolkit cracks that format open.
 │   ├── disasm_pack.py             Batch disassembler for all firmware modules
 │   ├── uli_tool.py                ULI resource archive tool (fonts, images)
 │   ├── patch_ipod_auth_retry.py   iPod/iPhone auth retry patch (v2.08)
+│   ├── patch_sd_cid_bypass.py    SD card CID verification bypass patch (v2.08)
 │   ├── validate_xozl.py           XOZL integrity and round-trip validator
-│   ├── build_patch.sh             End-to-end patch build script
+│   ├── verify_patched_iso.py      Full ISO verification suite (7 test categories)
+│   ├── build_iso.py               Firmware ISO builder (staging + mkisofs)
+│   ├── extract_all_uli.py         Batch ULI asset extractor
+│   ├── decompile_chunked.sh       Chunked C decompiler (RetDec wrapper)
+│   ├── build_patch.sh             End-to-end iPod patch build script
 │   └── docs/                      Detailed documentation per tool
-│       ├── xozl_tool_README.md    XOZL format specification + usage guide
-│       ├── disasm_README.md       Disassembly tools guide + examples
-│       └── uli_tool_README.md     ULI resource format documentation
+│       ├── xozl_tool_README.md                XOZL format spec + usage guide
+│       ├── disasm_README.md                   Disassembly tools guide + examples
+│       ├── uli_tool_README.md                 ULI resource format documentation
+│       ├── patch_ipod_auth_retry_README.md    iPod patch internals + code cave listing
+│       ├── patch_sd_cid_bypass_README.md      SD CID bypass patch details
+│       ├── validate_xozl_README.md            XOZL validation suite reference
+│       ├── verify_patched_iso_README.md       ISO verification suite (7 tests)
+│       ├── extract_all_uli_README.md          Batch ULI extractor usage
+│       ├── decompile_chunked_README.md        RetDec chunked decompiler guide
+│       ├── build_patch_README.md              Build pipeline documentation
+│       └── build_iso_README.md                ISO builder usage + format spec
 │
 ├── 208_source/                    Firmware analysis output (v2.08)
 │   ├── MODULES.md                 Complete module reference — what each
@@ -48,10 +61,8 @@ This toolkit cracks that format open.
 │   │   └── dragon.asm             Bootloader disassembly (MIPS64)
 │   └── index.json                 Master index with metadata for all modules
 │
-├── build/                         Patch build output (generated, .gitignore'd)
-│   ├── ProcHMI.elf                Decompressed original ELF
-│   ├── ProcHMI_patched.elf        Patched ELF (verified)
-│   └── ProcHMI_patched.out        Repackaged XOZL (ready to deploy)
+├── ProcHMI_patched.out            Patched ProcHMI (iPod auth retry) — ready to deploy
+├── sysprogosalio_patched.out      Patched sysprogosalio (SD CID bypass) — ready to deploy
 │
 └── carbon_stripe/                 Custom UI skin assets
 ```
@@ -66,8 +77,10 @@ generated or proprietary files are `.gitignore`'d:
 | `tools/` | Yes | All Python tools, shell scripts, docs |
 | `208_source/MODULES.md` | Yes | Module reference documentation |
 | `208_source/modules/`, `dragon/` | No | Regenerable: `python3 tools/disasm_pack.py` |
-| `build/` | No | Regenerable: `bash tools/build_patch.sh` |
+| `ProcHMI_patched.out` | No | Regenerable via patch workflow above |
+| `sysprogosalio_patched.out` | No | Regenerable via patch workflow above |
 | `Original Firmware Isos/` | No | Proprietary, obtain separately |
+| `Patched Firmware Isos/` | No | Regenerable via ISO build workflow above |
 | `carbon_stripe/` | Your call | Custom assets |
 
 ---
@@ -179,10 +192,47 @@ fonts, images, and other UI assets used by the head unit.
 
 Documentation: [`tools/docs/uli_tool_README.md`](tools/docs/uli_tool_README.md)
 
+### extract_all_uli.py — Batch ULI Asset Extractor
+
+Convenience wrapper that extracts all `.uli` files from the firmware directory
+in one pass. Produces the `assets_extracted/` tree with fonts, images, and
+configuration files (~2,500 assets total).
+
+```bash
+python3 tools/extract_all_uli.py
+```
+
+Documentation: [`tools/docs/extract_all_uli_README.md`](tools/docs/extract_all_uli_README.md)
+
+### patch_ipod_auth_retry.py — iPod/iPhone Auth Retry Patch
+
+Applies the MFi authentication retry patch to `ProcHMI.elf`. Injects 26
+MIPS instructions into a code cave and redirects both auth failure handlers.
+
+```bash
+python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
+python3 tools/patch_ipod_auth_retry.py --verify ProcHMI_patched.elf
+```
+
+Documentation: [`tools/docs/patch_ipod_auth_retry_README.md`](tools/docs/patch_ipod_auth_retry_README.md)
+
+### patch_sd_cid_bypass.py — SD Card CID Bypass Patch
+
+Applies the SD card CID verification bypass to `sysprogosalio.elf`. A single
+4-byte patch that forces the firmware's built-in "crypt disabled" code path.
+
+```bash
+python3 tools/patch_sd_cid_bypass.py apply sysprogosalio.elf sysprogosalio_patched.elf
+python3 tools/patch_sd_cid_bypass.py verify sysprogosalio_patched.elf
+```
+
+Documentation: [`tools/docs/patch_sd_cid_bypass_README.md`](tools/docs/patch_sd_cid_bypass_README.md)
+
 ### validate_xozl.py — XOZL Integrity Validator
 
 Comprehensive validation suite for verifying XOZL files are correct and
-bootloader-compatible.
+bootloader-compatible. Tests header structure, LZO decompression, CRC32, ELF
+magic, size match, byte-for-byte cross-validation, and header comparison.
 
 ```bash
 python3 tools/validate_xozl.py ProcHMI_patched.out \
@@ -190,9 +240,72 @@ python3 tools/validate_xozl.py ProcHMI_patched.out \
     --ref original/ProcHMI.out
 ```
 
-Tests: header structure, LZO decompression, CRC32, ELF magic, size match,
-byte-for-byte cross-validation, header comparison, and original-compatibility
-check (confirms the original also uses standard LZO1X).
+Documentation: [`tools/docs/validate_xozl_README.md`](tools/docs/validate_xozl_README.md)
+
+### verify_patched_iso.py — Full ISO Verification Suite
+
+End-to-end verification of a patched firmware ISO against the original.
+Performs 7 categories of checks that mirror the head unit bootloader's own
+validation sequence.
+
+```bash
+python3 tools/verify_patched_iso.py \
+    --patched-iso "Patched Firmware Isos/NAVI600_900 v2.08_patched.iso" \
+    --original-iso "Original Firmware Isos/NAVI600_900 v2.08.iso"
+```
+
+| Test | What it verifies |
+|------|------------------|
+| 1. ELF structural integrity | Valid 32-bit MIPS LE ELF headers, program segments, entry point within executable segment |
+| 2. Binary diff audit | Only the intended bytes changed — ProcHMI: 93 bytes, sysprogosalio: 3 bytes |
+| 3. XOZL header comparison | All metadata fields identical to original; only compressed size and CRC differ |
+| 4. `verify all` simulation | Decompress every `.out` via native liblzo2 and verify CRC32 |
+| 5. NAND flash capacity | Total firmware fits within the 64 MB NAND flash |
+| 6. Installation script dry-run | Every file referenced by `sys_dnl.bat`, `sys_toc.cfg`, `force.sys` exists |
+| 7. Cross-variant consistency | Patched files byte-identical between Navi 600 and Navi 900 |
+
+Documentation: [`tools/docs/verify_patched_iso_README.md`](tools/docs/verify_patched_iso_README.md)
+
+### decompile_chunked.sh — Chunked C Decompiler
+
+Shell script that decompiles `ProcHMI.elf` into pseudo-C using RetDec,
+processing the 10 MB `.text` section in 512 KB chunks for manageability.
+
+```bash
+bash tools/decompile_chunked.sh /path/to/ProcHMI.elf
+```
+
+Documentation: [`tools/docs/decompile_chunked_README.md`](tools/docs/decompile_chunked_README.md)
+
+### build_iso.py — Firmware ISO Builder
+
+Builds a complete firmware update ISO from a source directory. Stages only
+the correct variants (`g__eeu10`, `g_mpeu10`), excludes non-firmware files,
+substitutes patched modules, and creates an ISO with the exact same parameters
+as the factory original (Volume ID `CDROM`, System ID `Win32`, Joliet, Rock Ridge).
+
+```bash
+python3 tools/build_iso.py \
+    --source /path/to/dnl \
+    --output patched.iso \
+    --replace ProcHMI.out=ProcHMI_patched.out \
+    --replace sysprogosalio.out=sysprogosalio_patched.out \
+    --original-iso original.iso \
+    --verify
+```
+
+Documentation: [`tools/docs/build_iso_README.md`](tools/docs/build_iso_README.md)
+
+### build_patch.sh — End-to-End Patch Builder
+
+All-in-one script that runs the full iPod patch pipeline: extract → patch →
+verify → repack → validate.
+
+```bash
+bash tools/build_patch.sh /path/to/original/ProcHMI.out
+```
+
+Documentation: [`tools/docs/build_patch_README.md`](tools/docs/build_patch_README.md)
 
 ---
 
@@ -290,34 +403,20 @@ The bootloader at `0x4ab68` in `dragon.bin` identifies file types by magic:
 
 ---
 
-## Example: iPod/iPhone Connectivity Patch
+## Firmware Patches
 
-As a practical demonstration of the toolkit, this repository includes a
-complete binary patch that fixes a widespread iPhone connectivity issue
-on the Navi 600/900.
+This toolkit includes two production-ready binary patches for firmware v2.08,
+plus everything needed to build and verify a complete patched firmware ISO.
 
-### The Problem
+### Patch 1: iPod/iPhone Connectivity Fix
 
-iPhones connected via USB frequently fail with "This accessory is not
-supported." The MFi authentication handshake fails intermittently due to timing,
-and the firmware has no retry logic — it logs the error and gives up.
+**Problem:** iPhones connected via USB frequently fail with "This accessory
+is not supported." The MFi authentication handshake fails intermittently due
+to timing, and the firmware has no retry logic — it logs the error and gives up.
 
-### The Fix
-
-A 93-byte MIPS code patch injected into `ProcHMI.elf` that intercepts both
-auth failure handlers and adds automatic disconnect → delay → reconnect retry
-logic (up to 5 attempts).
-
-### Building the Patch
-
-```bash
-pip install python-lzo
-bash tools/build_patch.sh /path/to/original/ProcHMI.out
-```
-
-Runs: extract → patch → verify → repack → validate. Output: `build/ProcHMI_patched.out`.
-
-### Patch Details
+**Fix:** A 93-byte MIPS code patch injected into `ProcHMI.elf` that intercepts
+both auth failure handlers and adds automatic disconnect → delay → reconnect
+retry logic (up to 5 attempts).
 
 | Location | Description |
 |----------|-------------|
@@ -328,11 +427,80 @@ Runs: extract → patch → verify → repack → validate. Output: `build/ProcH
 The code cave performs: load retry counter → disconnect iAP session →
 busy-wait ~150ms → clear init flag → reconnect → return. After 5 failures,
 falls through to original behavior. Full technical breakdown in the patch
-tool's source: [`tools/patch_ipod_auth_retry.py`](tools/patch_ipod_auth_retry.py).
+tool source: [`tools/patch_ipod_auth_retry.py`](tools/patch_ipod_auth_retry.py).
 
-**Compatibility:** Verified against firmware v2.08 (`GM10.8V208`). The patch
-tool checks expected bytes at each site before writing, so it will refuse to
-patch an incompatible version.
+### Patch 2: SD Card CID Bypass
+
+**Problem:** Navigation map SD cards are cryptographically tied to the original
+card's CID (Card Identification). If the original card fails or needs to be
+cloned, the replacement card is rejected because its CID cannot be spoofed.
+The firmware checks a `cryptmarker.dat` file on the internal NAND flash and, if
+present, verifies the SD card's CID-based cryptographic signature on every
+card mount.
+
+**Fix:** A surgical 4-byte patch in `sysprogosalio.elf` that forces the
+"crypt disabled" code path, bypassing all CID-based signature verification.
+The patch replaces a single MIPS branch instruction (`bnez`) with a `nop` at
+VMA `0x001925BC`, inside the `vEnableCrypt` function. When the global
+`u32CryptEnabledStatus` is checked, the branch that would enable cryptographic
+verification is neutralized.
+
+| Location | Description |
+|----------|-------------|
+| `0x001925BC` | `bnez $v0, +0x48` → `nop` (4 bytes changed, 3 non-zero → zero) |
+
+This causes `fd_crypt_verify_signaturefile` to always return success, regardless
+of which physical SD card is inserted. Full details in:
+[`tools/patch_sd_cid_bypass.py`](tools/patch_sd_cid_bypass.py).
+
+### Building the Patched ISO
+
+Both patches apply to both Navi 600 (`g__eeu10`) and Navi 900 (`g_mpeu10`)
+variants — the patched module binaries are byte-identical across variants.
+
+```bash
+pip install python-lzo capstone
+
+# 1. Extract, patch, and repackage ProcHMI
+python3 tools/xozl_tool.py extract original/ProcHMI.out /tmp/ProcHMI.elf
+python3 tools/patch_ipod_auth_retry.py /tmp/ProcHMI.elf /tmp/ProcHMI_patched.elf
+python3 tools/xozl_tool.py pack /tmp/ProcHMI_patched.elf ProcHMI_patched.out --ref original/ProcHMI.out
+
+# 2. Extract, patch, and repackage sysprogosalio
+python3 tools/xozl_tool.py extract original/sysprogosalio.out /tmp/sysprogosalio.elf
+python3 tools/patch_sd_cid_bypass.py apply /tmp/sysprogosalio.elf /tmp/sysprogosalio_patched.elf
+python3 tools/xozl_tool.py pack /tmp/sysprogosalio_patched.elf sysprogosalio_patched.out --ref original/sysprogosalio.out
+
+# 3. Build the ISO (stages correct variants, substitutes patched files, verifies)
+python3 tools/build_iso.py \
+    --source /path/to/dnl \
+    --output patched.iso \
+    --replace ProcHMI.out=ProcHMI_patched.out \
+    --replace sysprogosalio.out=sysprogosalio_patched.out \
+    --original-iso original.iso \
+    --verify
+```
+
+### LZO Compression Compatibility
+
+Patched files are recompressed using **LZO1X-1** (`lzo1x_1_compress`), the
+standard fast-path compressor from the LZO library. The resulting streams are
+decompressed by the bootloader using `lzo1x_decompress_safe`, which accepts
+output from any LZO1X compressor variant. This was verified by:
+
+1. **miniLZO reference decompressor test** — a C test program using the miniLZO
+   reference library successfully decompresses all patched XOZL payloads.
+2. **Round-trip byte-for-byte test** — original ELF → LZO1X-1 compress →
+   miniLZO decompress → byte-exact match with original.
+3. **Full ISO verification suite** — all `.out` files across both variants
+   decompress cleanly via native `liblzo2` with CRC32 verification matching
+   the values stored in the XOZL headers.
+
+### Patch Compatibility
+
+Both patches are verified against firmware v2.08 (`GM10.8V208`). Each patch
+tool checks expected bytes at the patch site before writing, and will refuse
+to patch an incompatible binary version.
 
 ---
 
