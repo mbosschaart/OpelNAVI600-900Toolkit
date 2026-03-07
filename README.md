@@ -33,6 +33,7 @@ This toolkit cracks that format open.
 │   ├── extract_all_uli.py         Batch ULI asset extractor
 │   ├── decompile_chunked.sh       Chunked C decompiler (RetDec wrapper)
 │   ├── build_patch.sh             End-to-end iPod patch build script
+│   ├── build_backup_iso.py        NAND backup ISO builder (copies NAND → USB)
 │   └── docs/                      Detailed documentation per tool
 │       ├── xozl_tool_README.md                XOZL format spec + usage guide
 │       ├── disasm_README.md                   Disassembly tools guide + examples
@@ -44,7 +45,8 @@ This toolkit cracks that format open.
 │       ├── extract_all_uli_README.md          Batch ULI extractor usage
 │       ├── decompile_chunked_README.md        RetDec chunked decompiler guide
 │       ├── build_patch_README.md              Build pipeline documentation
-│       └── build_iso_README.md                ISO builder usage + format spec
+│       ├── build_iso_README.md                ISO builder usage + format spec
+│       └── build_backup_iso_README.md         NAND backup ISO builder docs
 │
 ├── 208_source/                    Firmware analysis output (v2.08)
 │   ├── MODULES.md                 Complete module reference — what each
@@ -306,6 +308,30 @@ bash tools/build_patch.sh /path/to/original/ProcHMI.out
 ```
 
 Documentation: [`tools/docs/build_patch_README.md`](tools/docs/build_patch_README.md)
+
+### build_backup_iso.py — NAND Backup ISO Builder
+
+Creates a minimal ISO that copies all known NAND flash contents to a USB
+stick via the bootloader's batch interpreter. The ISO contains only batch
+scripts — no firmware binaries. When inserted as a CD with a FAT32 USB stick
+connected, the head unit copies 119 files (firmware modules, registry,
+config, and runtime data) from `/dev/nand0/` to `/dev/uda/nand_backup/`.
+
+```bash
+# Build backup ISO
+python3 tools/build_backup_iso.py --output nand_backup.iso
+
+# Preview generated batch script
+python3 tools/build_backup_iso.py --print-script
+
+# Use alternate USB device
+python3 tools/build_backup_iso.py --output nand_backup.iso --usb-path /dev/udb
+```
+
+Safety features: `pre_dnl.bat` is a no-op (prevents NOR flash programming),
+`verify off` skips missing files, no destructive commands (delete/erase/program).
+
+Documentation: [`tools/docs/build_backup_iso_README.md`](tools/docs/build_backup_iso_README.md)
 
 ---
 
