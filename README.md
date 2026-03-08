@@ -38,6 +38,7 @@ This toolkit cracks that format open.
 │   ├── decompile_chunked.sh       Chunked C decompiler (RetDec wrapper)
 │   ├── build_patch.sh             End-to-end iPod patch build script
 │   ├── build_backup_iso.py        NAND backup ISO builder (copies NAND → USB)
+│   ├── cco_tool.py                CCO/dialog blob decoder (ULI type=2, LZSS)
 │   └── docs/                      Detailed documentation per tool
 │       ├── xozl_tool_README.md                XOZL format spec + usage guide
 │       ├── disasm_README.md                   Disassembly tools guide + examples
@@ -50,7 +51,8 @@ This toolkit cracks that format open.
 │       ├── decompile_chunked_README.md        RetDec chunked decompiler guide
 │       ├── build_patch_README.md              Build pipeline documentation
 │       ├── build_iso_README.md                ISO builder usage + format spec
-│       └── build_backup_iso_README.md         NAND backup ISO builder docs
+│       ├── build_backup_iso_README.md         NAND backup ISO builder docs
+│       └── cco_tool_README.md                 CCO/dialog blob decoder docs
 │
 ├── 208_source/                    Firmware analysis output (v2.08)
 │   ├── MODULES.md                 Complete module reference — what each
@@ -341,6 +343,21 @@ Safety features: `pre_dnl.bat` is a no-op (prevents NOR flash programming),
 `verify off` skips missing files, no destructive commands (delete/erase/program).
 
 Documentation: [`tools/docs/build_backup_iso_README.md`](tools/docs/build_backup_iso_README.md)
+
+### cco_tool.py — CCO/Dialog Blob Decoder
+
+Decodes `.cco.bin` blobs extracted from `dialogs.sdp`. These contain dialog
+definitions and UI resources used by the HMI layer. The blobs use a ULI
+container (type=2) with an obfuscated LZSS-compressed payload. The decoding
+pipeline de-obfuscates each byte (`(~b) ^ 1`), then LZSS-decompresses with a
+4 KiB sliding window.
+
+```bash
+python3 tools/cco_tool.py info dialog.cco.bin
+python3 tools/cco_tool.py decode dialog.cco.bin output.bin
+```
+
+Documentation: [`tools/docs/cco_tool_README.md`](tools/docs/cco_tool_README.md)
 
 ---
 
