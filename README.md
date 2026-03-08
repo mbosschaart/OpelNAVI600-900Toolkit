@@ -1,5 +1,7 @@
 # Opel Navi 600/900 Firmware Toolkit
 
+> **WARNING:** These scripts are provided for educational purposes only, and use of them is solely the risk of the user. **YOU MAY BRICK YOUR UNIT REQUIRING PROFESSIONAL RECOVERY.**
+
 A reverse engineering toolkit for the **Opel/Vauxhall Navi 600 and Navi 900**
 head units (GM-GE platform, manufactured by Bosch). Provides tools to
 decompress, inspect, disassemble, modify, and repackage the firmware — turning
