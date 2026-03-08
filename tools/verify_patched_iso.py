@@ -329,16 +329,26 @@ def check_xozl_headers(patched_xozl: dict, orig_xozl: dict, filename: str) -> bo
 
     pt = patched_xozl["trailer"]
     ot = orig_xozl["trailer"]
-    if pt == ot:
+    # The last 4 bytes of the trailer are a whole-file CRC32 (bIsFileValid).
+    # This will legitimately differ for patched files, so compare only the body.
+    pt_body = pt[:-4] if len(pt) >= 4 else pt
+    ot_body = ot[:-4] if len(ot) >= 4 else ot
+    if pt_body == ot_body:
+        ok(f"Trailer body: identical ({len(pt_body)} bytes, excluding whole-file CRC)")
+        if len(pt) >= 4 and len(ot) >= 4:
+            raw = patched_xozl["raw"]
+            file_crc = binascii.crc32(raw[:-4]) & 0xFFFFFFFF
+            stored_crc = struct.unpack_from("<I", raw, len(raw) - 4)[0]
+            if file_crc == stored_crc:
+                ok(f"Whole-file CRC32: 0x{stored_crc:08X} (bIsFileValid pass)")
+            else:
+                fail(f"Whole-file CRC32 mismatch: stored=0x{stored_crc:08X}, computed=0x{file_crc:08X}")
+                passed = False
+    elif pt == ot:
         ok(f"Trailer: identical ({len(pt)} bytes)")
     else:
-        pt_stripped = pt.rstrip(b"\x00\x01")
-        ot_stripped = ot.rstrip(b"\x00\x01")
-        if pt_stripped == ot_stripped:
-            ok("Trailer: content matches (padding differs)")
-        else:
-            fail(f"Trailer content differs")
-            passed = False
+        fail(f"Trailer body content differs (excluding CRC)")
+        passed = False
 
     return passed
 
