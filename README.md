@@ -206,11 +206,14 @@ python3 tools/extract_all_uli.py
 
 Documentation: [`tools/docs/extract_all_uli_README.md`](tools/docs/extract_all_uli_README.md)
 
-### patch_ipod_auth_retry.py — iPod/iPhone Auth Graceful Failure Patch (v3)
+### patch_ipod_auth_retry.py — iPod/iPhone Auth Retry Patch (v3.1)
 
-Prevents head unit crashes when iPhone MFi authentication fails. Injects a
-minimal 6-instruction code cave that cleanly handles auth failure without
-touching the device object, avoiding the stale-pointer crash on USB disconnect.
+Adds automatic MFi authentication retry with crash-safe coordinator reset.
+On auth failure, calls the firmware's own coordinator reset function
+(`function_4ec608`) and clears the init flag, allowing the firmware's timer
+chain to re-detect the device and retry (up to 3 attempts). Gives up
+gracefully after 3 failures. All paths bypass `CALLBACK_EXIT` entirely,
+preventing the stale-pointer crash on USB disconnect.
 
 ```bash
 python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
@@ -472,34 +475,38 @@ The bootloader at `0x4ab68` in `dragon.bin` identifies file types by magic:
 This toolkit includes two production-ready binary patches for firmware v2.08,
 plus everything needed to build and verify a complete patched firmware ISO.
 
-### Patch 1: iPod/iPhone Graceful Failure Fix (v3)
+### Patch 1: iPod/iPhone Auth Retry + Crash Fix (v3.1)
 
 **Problem:** When an iPhone's MFi authentication fails (common with newer
-iPhones that have reduced or no iAP1 support), the firmware's error handler
-goes through a complex epilog that accesses the device object pointer. If
-the user then physically disconnects the USB cable, the USB removal handler
-fires while the coordinator is in a half-torn-down state, causing a
-null/stale pointer crash that reboots the head unit.
+iPhones that have reduced or no iAP1 support), the firmware gives up without
+retrying. Additionally, the error handler's epilog accesses device object
+pointers that become stale if the cable is unplugged, crashing the head unit.
 
 **Note:** The Navi 600/900 uses iAP1 (iPod Accessory Protocol v1) only.
-Newer iPhones (USB-C era) have dropped iAP1 support and will always show
-"This accessory is not compatible." This patch cannot fix the protocol
-incompatibility — it prevents the head unit from crashing when auth fails.
+USB-C era iPhones have dropped iAP1 support and will always show "This
+accessory is not compatible." This patch cannot fix the protocol
+incompatibility, but it prevents crashes and retries for Lightning iPhones
+where MFi auth is timing-sensitive.
 
-**Fix (v3):** A minimal 24-byte code cave in `ProcHMI.elf` that intercepts
-both auth failure handlers and cleanly exits without touching the device:
+**Fix (v3.1):** A 64-byte code cave in `ProcHMI.elf` that intercepts both
+auth failure handlers with automatic retry and crash-safe coordinator reset:
 
 | Location | Description |
 |----------|-------------|
 | `0x004f0714` | Auth CP Error handler → jump to code cave |
 | `0x004f077c` | Auth Failed handler → jump to code cave |
-| `0x009a87a0` | Code cave: 6 instructions — clear init flag, set error state, return |
+| `0x009a87a0` | Code cave: 16 instructions — retry counter + coordinator reset + epilog |
 
-The v3 code cave: clears the "already initialized" flag → sets coordinator
-state to 0x13 (error/terminal) → jumps directly to the register-restore
-epilog at `0x4F0B9C`, bypassing `CALLBACK_EXIT` entirely. No device pointer
-is accessed, no disconnect is called — the USB removal handler can safely
-clean up when the cable is physically disconnected. Full technical breakdown:
+**How it works:** On auth failure, the code cave increments a retry counter
+(stored at coordinator+`0x5CE`). If under 3 attempts, it calls
+`function_4ec608` — the firmware's **own coordinator reset function** (used
+during normal iPod detach and undervoltage recovery) — then clears the global
+init flag (`g1215`). The firmware's timer chain (Timer 2 @ 2s, Timer 1 @ 5s)
+re-detects the still-connected USB device and triggers fresh initialization
+with a new MFi auth attempt. After 3 failed attempts, it gives up gracefully
+(state = 0x13/error). All paths bypass `CALLBACK_EXIT` entirely — no device
+pointer is ever accessed, preventing the stale-pointer crash on cable
+disconnect. Full technical breakdown:
 [`tools/docs/patch_ipod_auth_retry_README.md`](tools/docs/patch_ipod_auth_retry_README.md).
 
 ### Patch 2: SD Card CID Bypass

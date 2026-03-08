@@ -1,89 +1,120 @@
-# patch_ipod_auth_retry.py — iPod/iPhone MFi Auth Graceful Failure Patch (v3)
+# patch_ipod_auth_retry.py — iPod/iPhone MFi Auth Retry Patch (v3.1)
 
-Binary patch for `ProcHMI.elf` that prevents head unit crashes when iPhone
-MFi authentication fails on the Opel Navi 600/900 (firmware v2.08).
+Binary patch for `ProcHMI.elf` that adds automatic MFi authentication retry
+with crash-safe coordinator reset on the Opel Navi 600/900 (firmware v2.08).
 
 ## Background
 
 The Navi 600/900 uses iAP1 (iPod Accessory Protocol version 1) with an
 MFi 1.0 authentication chip (CP20) to communicate with iPhones over USB.
 When MFi authentication fails (event 1 "Auth CP Error" or event 2
-"Authentication Failed"), the firmware's error handler goes through a
-complex epilog path (`CALLBACK_EXIT` at `0x4F0AA0`) that accesses the
-device object pointer at `0x10($s1)`. If the user then physically
-disconnects the USB cable, the USB removal handler fires while the
-coordinator is in a partially-torn-down state, causing a null/stale pointer
-crash that reboots the head unit.
+"Authentication Failed"), the firmware logs the error and gives up without
+retrying. Since MFi auth is timing-sensitive, a simple retry often succeeds.
+
+Additionally, the error handler's epilog (`CALLBACK_EXIT` at `0x4F0AA0`)
+accesses device object pointers. If the user physically disconnects the cable
+while the coordinator is in a partially-handled state, the USB removal handler
+hits stale pointers and crashes the head unit.
 
 ### iPhone compatibility
 
-The firmware only speaks iAP1. Newer iPhones have progressively reduced
-or dropped iAP1 support:
-
 | Device | Protocol Support | Expected Behavior |
 |--------|-----------------|-------------------|
-| iPhone 7 and earlier (Lightning) | iAP1 supported | Works normally |
-| iPhone 13 era (Lightning) | iAP1 reduced | Intermittent connection |
-| iPhone 15+ (USB-C) | iAP1 likely dropped | "Accessory not compatible" |
+| iPhone 7 and earlier (Lightning) | iAP1 supported | Retry should help |
+| iPhone 13 era (Lightning) | iAP1 reduced | Retry may help |
+| iPhone 15+ (USB-C) | iAP1 likely dropped | Fails gracefully after 3 attempts |
 
-This patch cannot fix the protocol incompatibility with newer iPhones — it
-can only ensure the head unit doesn't crash when auth fails.
+## What the Patch Does (v3.1)
 
-## What the Patch Does (v3)
+Injects a 16-instruction (64-byte) code cave and redirects both auth failure
+handlers to it. The code cave implements two paths:
 
-Injects a minimal 6-instruction (24-byte) code cave into an unused region
-of `ProcHMI.elf` and redirects both auth failure handlers to it. The code cave:
+### Retry path (counter < 3)
 
-1. Clears the "already initialized" flag at `0x089985F0` so a future
-   re-plug starts a fresh init sequence
-2. Sets the coordinator state machine to the error state (0x13)
-3. Jumps **directly** to the function epilog (register restore + return
-   at `0x4F0B9C`), bypassing `CALLBACK_EXIT` entirely
+1. Increments a retry counter stored at coordinator+`0x5CE`
+2. Calls `function_4ec608` — the firmware's **own coordinator reset function**
+   (the same function used during iPod detach and undervoltage recovery). This
+   properly clears all internal fields: state → 0, connected flag → 0, deck
+   status flags, buffer regions, etc.
+3. Clears the global "already initialized" flag (`g1215` at `0x089985F0`) so
+   the init function (`0x4ec40c`) won't early-exit on the next call
+4. Returns through the direct function epilog (register restore at `0x4F0B9C`)
 
-This approach leaves the device object completely untouched — the USB
-removal handler can safely clean it up when the cable is disconnected.
+The coordinator is now in a clean idle state. The firmware's timer chain
+(Timer 2 @ 2s, Timer 1 @ 5s) re-detects the still-connected USB device,
+triggers fresh initialization through `iPodCtrlCoordinator::initialize`,
+and attempts MFi authentication again.
+
+### Give-up path (counter >= 3)
+
+1. Resets the retry counter to 0 (ready for next device session)
+2. Sets coordinator state to `0x13` (error/terminal)
+3. Returns through the direct function epilog
+
+### Why this is safe
+
+- **No `iPod_cmd_disconnect` call**: v2's crash was caused by disconnect
+  tearing down the device object. v3.1 uses `function_4ec608` instead, which
+  only resets internal coordinator state without touching the device/USB layer.
+- **Bypasses CALLBACK_EXIT entirely**: all paths jump directly to the register
+  restore epilog at `0x4F0B9C`, avoiding all code that accesses device pointers.
+- **Uses firmware's own reset**: `function_4ec608` is the same function the
+  firmware calls during normal iPod detach — it's proven safe.
 
 ### Version history
 
-**v3** (current) — Graceful failure, crash fix:
-- Removed `iPod_cmd_disconnect` call (was the root cause of the crash —
-  tearing down the device object left stale pointers for the USB removal
-  handler)
-- Removed retry counter logic (retries cannot help when the iPhone doesn't
-  support iAP1 at all)
-- Removed stack safety flag mechanism (unnecessary — we bypass
-  `CALLBACK_EXIT` entirely by jumping to the direct epilog)
-- Jump target changed from `CALLBACK_EXIT` (`0x4F0AA0`) to the register
-  restore epilog (`0x4F0B9C`), avoiding all code that touches the device
-  pointer
-
-**v2** — Disconnect-only with stack safety:
-- Removed `iPod_cmd_connect` and busy-wait from v1
-- Added stack safety flag `0x20($sp)` to skip dangerous `0x4e6ee4` call
-- Still called `iPod_cmd_disconnect` — which caused the crash
-
-**v1** — Initial retry patch:
-- Called `iPod_cmd_connect` from within callback (stale state crash)
-- Used ~150ms busy-wait loop (blocked event processing)
-- Missing safety flags on give-up path
+| Version | Approach | Issue |
+|---------|----------|-------|
+| **v3.1** | Coordinator reset (`4ec608`) + retry counter + direct epilog | Current |
+| v3 | Graceful failure only (no retry) + direct epilog | No crash, but no retry |
+| v2 | `iPod_cmd_disconnect` + retry + `CALLBACK_EXIT` with safety flag | Crash on cable pull |
+| v1 | `iPod_cmd_connect` + busy-wait + `CALLBACK_EXIT` | Crash + stale state |
 
 ## Patch Sites
 
 | Address | What | Bytes Changed |
 |---------|------|---------------|
-| `0x004F0714` | Event 1 handler: 3 instructions replaced with `j 0x9A87A0` + 2x `nop` | 10 bytes |
-| `0x004F077C` | Event 2 handler: 3 instructions replaced with `j 0x9A87A0` + 2x `nop` | 11 bytes |
-| `0x009A87A0` | Code cave: 6 MIPS instructions (was all zeros) | 21 bytes |
+| `0x004F0714` | Event 1 handler: 3 instructions → `j 0x9A87A0` + 2x `nop` | 10 bytes |
+| `0x004F077C` | Event 2 handler: 3 instructions → `j 0x9A87A0` + 2x `nop` | 11 bytes |
+| `0x009A87A0` | Code cave: 16 MIPS instructions (was all zeros) | 57 bytes |
 
-Total: 42 byte differences at the ELF level.
+Total: 78 byte differences at the ELF level.
 
 ## Key Addresses
 
 | Symbol | Address | Purpose |
 |--------|---------|---------|
-| `INIT_FLAG_ADDR` | `0x089985F0` | Global "already initialized" flag — cleared to allow reinit |
+| `function_4ec608` | `0x004EC608` | Firmware's coordinator reset (clears state, flags, buffers) |
+| `INIT_FLAG_ADDR` | `0x089985F0` | Global `g1215` "already initialized" flag |
 | `EPILOG_RETURN` | `0x004F0B9C` | Register restore + `jr $ra` + stack cleanup |
-| `ERROR_STATE` | `0x13` | Coordinator state machine error/terminal state |
+| `RETRY_OFFSET` | `+0x5CE` | Retry counter byte in coordinator object |
+
+## MIPS Code Cave Listing (v3.1)
+
+```
+; --- Retry check ---
+0x9A87A0: lbu   $v0, 0x5CE($s1)      ; load retry counter
+0x9A87A4: sltiu $v1, $v0, 3           ; v1 = (counter < 3)
+0x9A87A8: beqz  $v1, give_up          ; if >= 3 → give up
+0x9A87AC: addiu $v0, $v0, 1           ; increment counter (delay slot)
+
+; --- Retry path ---
+0x9A87B0: sb    $v0, 0x5CE($s1)       ; save incremented counter
+0x9A87B4: jal   0x4EC608             ; call firmware's coordinator reset
+0x9A87B8: move  $a0, $s1              ; (delay slot) pass coordinator as arg
+0x9A87BC: lui   $v0, 0x089A           ; g1215 addr high
+0x9A87C0: sb    $zero, -0x7A10($v0)   ; clear g1215 → allows fresh init
+0x9A87C4: j     0x4F0B9C             ; jump to function epilog
+0x9A87C8: addiu $v0, $zero, 1         ; return 1 (delay slot)
+
+; --- Give-up path ---
+give_up:
+0x9A87CC: sb    $zero, 0x5CE($s1)     ; reset counter for next session
+0x9A87D0: addiu $v0, $zero, 0x13      ; state = 19 (error)
+0x9A87D4: sw    $v0, 0x60($s1)        ; set coordinator state
+0x9A87D8: j     0x4F0B9C             ; jump to function epilog
+0x9A87DC: addiu $v0, $zero, 1         ; return 1 (delay slot)
+```
 
 ## Usage
 
@@ -93,76 +124,18 @@ Total: 42 byte differences at the ELF level.
 python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
 ```
 
-The tool verifies expected bytes at both patch sites and confirms the code cave
-region is empty before writing. It will refuse to patch if:
-- The bytes at the patch sites don't match v2.08 (wrong firmware version)
-- The code cave region is not all zeros (already patched)
-
 ### Verify a patched file
 
 ```bash
 python3 tools/patch_ipod_auth_retry.py --verify ProcHMI_patched.elf
 ```
 
-Checks that the jump instructions and code cave are present and correct.
-Returns exit code 0 on success, 1 on failure.
-
-## End-to-End Workflow
-
-```bash
-# 1. Decompress the XOZL module
-python3 tools/xozl_tool.py extract ProcHMI.out ProcHMI.elf
-
-# 2. Apply patch
-python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
-
-# 3. Verify
-python3 tools/patch_ipod_auth_retry.py --verify ProcHMI_patched.elf
-
-# 4. Repack into XOZL (recomputes both content CRC and whole-file CRC)
-python3 tools/xozl_tool.py pack ProcHMI_patched.elf ProcHMI_patched.out --ref ProcHMI.out
-
-# 5. Validate the XOZL output
-python3 tools/validate_xozl.py ProcHMI_patched.out --elf ProcHMI_patched.elf --ref ProcHMI.out
-```
-
 ## Dependencies
 
 - Python 3.10+
-- No third-party packages required (uses only `struct`, `argparse`, `pathlib`)
+- No third-party packages required
 
 ## Compatibility
 
 - Firmware v2.08 (`GM10.8V208`) only
 - Applies identically to both Navi 600 (`g__eeu10`) and Navi 900 (`g_mpeu10`)
-  — the `ProcHMI.out` modules are byte-identical across variants
-
-## MIPS Code Cave Listing (v3)
-
-The 6 instructions injected at `0x009A87A0`:
-
-```
-0x9A87A0: lui   $v0, 0x089A           ; INIT_FLAG_ADDR high (0x089985F0)
-0x9A87A4: sb    $zero, -0x7A10($v0)   ; clear init flag → allows reinit on replug
-0x9A87A8: addiu $v0, $zero, 0x13      ; v0 = 19 (error state)
-0x9A87AC: sw    $v0, 0x60($s1)        ; coordinator state = 19
-0x9A87B0: j     0x4F0B9C             ; jump to function epilog (register restore)
-0x9A87B4: addiu $v0, $zero, 1         ; delay slot: return value = 1
-```
-
-### Why bypass CALLBACK_EXIT?
-
-The exit path at `0x4F0AA0` (CALLBACK_EXIT) accesses the device pointer:
-```
-0x4F0AA0: lbu  $v0, 0x20($sp)        ; load skip flag
-0x4F0AA4: bnel $v0, $zero, 0x4F0AD8  ; if set → skip 0x4e6ee4 call
-  ...
-0x4F0AB8: jal  0x4e6ee4              ; reads 0x6e0($a0) — crashes if $a0 is stale
-0x4F0ABC: lw   $a0, 0x10($s1)        ; device pointer (delay slot)
-```
-
-Even when the `0x20($sp)` flag is set to skip `0x4e6ee4`, the epilog code
-after `0x4F0AD8` still accesses `0x10($s1)` and other coordinator fields.
-By jumping directly to the register restore at `0x4F0B9C`, we avoid all of
-this — no device pointer is accessed, no coordinator fields are read, and
-the function returns cleanly with all saved registers restored from the stack.

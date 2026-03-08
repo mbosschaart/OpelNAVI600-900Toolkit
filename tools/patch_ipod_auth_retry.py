@@ -1,41 +1,43 @@
 #!/usr/bin/env python3
 """
-Patch ProcHMI.elf for graceful MFi authentication failure handling (v3).
+Patch ProcHMI.elf for MFi authentication retry with crash-safe coordinator
+reset (v3.1).
 
 Problem:
-  When an iPhone's MFi authentication fails (common with newer iPhones that
-  have reduced or no iAP1 support), the firmware's error handler goes through
-  a complex epilog path (CALLBACK_EXIT at 0x4f0aa0) that accesses the device
-  object pointer at 0x10($s1). If the user then unplugs the cable, the USB
-  removal handler fires while the coordinator is in a half-torn-down state,
-  causing a null/stale pointer crash that reboots the head unit.
+  When an iPhone's MFi authentication fails, the firmware gives up without
+  retrying. Additionally, the error handler's epilog accesses device object
+  pointers that become stale if the cable is unplugged, crashing the head unit.
 
-Fix (v3 — graceful failure, no disconnect, no retry):
+Fix (v3.1 — coordinator reset + retry):
   Redirects both auth failure handlers (event=1 "Auth CP Error" and event=2
   "Authentication Failed") in iPodCtrlCoordinator::onMediaDeviceCallback to a
-  minimal code cave that:
-    1. Clears the "already initialized" flag so a future re-plug starts fresh
-    2. Sets the coordinator state to 0x13 (error/terminal state)
-    3. Jumps directly to the function epilog (register restore + return at
-       0x4f0b9c), bypassing ALL of CALLBACK_EXIT
+  code cave that:
 
-  This approach does NOT call iPod_cmd_disconnect (which was causing the crash
-  by tearing down the device object that the USB removal handler later tries
-  to access). The device object remains untouched — the USB removal handler
-  can safely clean it up when the cable is physically disconnected.
+  Retry path (counter < 3):
+    1. Increments a retry counter at coordinator+0x5CE
+    2. Calls function_4ec608 (the firmware's own coordinator reset function,
+       used during detach/undervoltage recovery) — properly clears state,
+       connected flag, deck status, and all internal fields
+    3. Clears the global "already initialized" flag (g1215 at 0x089985F0)
+    4. Jumps directly to the function epilog at 0x4f0b9c
 
-  v3 changes (crash fix):
-    - Removed iPod_cmd_disconnect call (root cause of the crash)
-    - Removed retry counter logic (can't help — iAP1 incompatible phones
-      will never pass MFi auth regardless of retries)
-    - Removed stack safety flag (unnecessary — we bypass CALLBACK_EXIT entirely)
-    - Jump target changed from CALLBACK_EXIT (0x4f0aa0) to direct epilog
-      (0x4f0b9c), avoiding all code that touches the device pointer
+    The coordinator is now in a clean idle state (state=0, connected=0).
+    The firmware's timer chain (Timer 2 @ 2s / Timer 1 @ 5s) re-detects
+    the still-connected USB device, triggers fresh initialization through
+    iPodCtrlCoordinator::initialize, and attempts MFi auth again.
+
+  Give-up path (counter >= 3):
+    1. Resets the retry counter (ready for next device session)
+    2. Sets coordinator state to 0x13 (error/terminal)
+    3. Jumps directly to the function epilog
+
+  All paths bypass CALLBACK_EXIT entirely — no device pointer is ever
+  accessed, preventing the stale-pointer crash on cable disconnect.
 
 Patch Sites:
   0x004f0714: event=1 handler -> jump to code cave (replaces 3 instructions)
   0x004f077c: event=2 handler -> jump to code cave (replaces 3 instructions)
-  0x009a87a0: code cave (6 instructions / 24 bytes in .fini/.rodata gap)
+  0x009a87a0: code cave (16 instructions / 64 bytes in .fini/.rodata gap)
 
 Usage:
   python3 patch_ipod_auth_retry.py <input.elf> <output.elf>
@@ -82,23 +84,30 @@ CODE_CAVE       = 0x009A87A0
 PATCH1_ADDR     = 0x004F0714
 PATCH2_ADDR     = 0x004F077C
 EPILOG_RETURN   = 0x004F0B9C  # register restore + jr $ra + sp cleanup
-INIT_FLAG_ADDR  = 0x089985F0  # "already initialized" global flag
+COORD_RESET_FN  = 0x004EC608  # firmware's own coordinator reset function
+INIT_FLAG_ADDR  = 0x089985F0  # "already initialized" global flag (g1215)
+RETRY_OFFSET    = 0x5CE       # unused byte in coordinator object
 ERROR_STATE     = 0x13        # coordinator state machine error state
+MAX_RETRIES     = 3           # auth attempts before giving up
 
 ORIGINAL_PATCH1 = bytes.fromhex("6000228e1300422805004050")
 ORIGINAL_PATCH2 = bytes.fromhex("6000228e13004228f4ff4050")
 
 
 def build_cave() -> bytes:
-    """Build the v3 code cave — graceful failure, no disconnect, no retry.
+    """Build the v3.1 code cave — coordinator reset + retry.
 
-    Layout (6 instructions, 24 bytes):
-      [0-1]  Clear "already initialized" flag (future re-plug starts fresh)
-      [2-3]  Set coordinator state to 19 (error/terminal)
-      [4-5]  Jump directly to function epilog (register restore + return)
+    Layout (16 instructions, 64 bytes):
+      [0-3]   Retry check: load counter, compare < MAX_RETRIES, branch
+      [4-10]  Retry path:  increment counter, call coordinator reset,
+              clear global init flag, jump to epilog
+      [11-15] Give-up path: reset counter, set state=19, jump to epilog
 
-    Does NOT call iPod_cmd_disconnect — the device object stays valid so
-    the USB removal handler can safely clean it up on cable disconnect.
+    Calls the firmware's own coordinator reset function (0x4ec608) which
+    properly clears all internal fields (state, connected flag, deck status,
+    etc.) — the same function used during iPod detach and undervoltage recovery.
+
+    Does NOT call iPod_cmd_disconnect — avoids tearing down the device object.
     Bypasses CALLBACK_EXIT entirely — no code touches the device pointer.
     """
     cave = bytearray()
@@ -109,12 +118,27 @@ def build_cave() -> bytes:
         hi = (hi + 1) & 0xFFFF
         lo = lo - 0x10000
 
-    cave += LUI("v0", hi)                     # 0: upper addr of init flag
-    cave += SB("zero", lo, "v0")              # 1: clear init flag
-    cave += ADDIU("v0", "zero", ERROR_STATE)  # 2: v0 = 19
-    cave += SW("v0", 0x60, "s1")              # 3: coordinator state = 19
-    cave += J(EPILOG_RETURN)                   # 4: jump to register restore + return
-    cave += ADDIU("v0", "zero", 1)            # 5: delay slot: return value = 1
+    # --- Retry check (instructions 0-3) ---
+    cave += LBU("v0", RETRY_OFFSET, "s1")     # 0: load retry counter
+    cave += SLTIU("v1", "v0", MAX_RETRIES)    # 1: v1 = (counter < 3)
+    cave += BEQZ("v1", 8)                     # 2: if >= 3 → give_up @11
+    cave += ADDIU("v0", "v0", 1)              # 3: increment (delay slot)
+
+    # --- Retry path (instructions 4-10) ---
+    cave += SB("v0", RETRY_OFFSET, "s1")      # 4: save incremented counter
+    cave += JAL(COORD_RESET_FN)                # 5: call firmware's coordinator reset
+    cave += MOVE("a0", "s1")                   # 6: (delay slot) coordinator ptr as arg
+    cave += LUI("v0", hi)                     # 7: upper addr of init flag
+    cave += SB("zero", lo, "v0")              # 8: clear g1215 → allows fresh init
+    cave += J(EPILOG_RETURN)                   # 9: jump to register restore + return
+    cave += ADDIU("v0", "zero", 1)            # 10: delay slot: return value = 1
+
+    # --- Give-up path (instructions 11-15) ---
+    cave += SB("zero", RETRY_OFFSET, "s1")    # 11: reset counter for next session
+    cave += ADDIU("v0", "zero", ERROR_STATE)  # 12: v0 = 19
+    cave += SW("v0", 0x60, "s1")              # 13: coordinator state = error
+    cave += J(EPILOG_RETURN)                   # 14: jump to register restore + return
+    cave += ADDIU("v0", "zero", 1)            # 15: delay slot: return value = 1
 
     return bytes(cave)
 
