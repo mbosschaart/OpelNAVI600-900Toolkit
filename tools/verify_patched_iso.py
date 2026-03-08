@@ -43,7 +43,7 @@ RESET = "\033[0m"
 VARIANTS = ["g__eeu10", "g_mpeu10"]
 PATCHED_FILES = {"ProcHMI.out", "sysprogosalio.out"}
 EXPECTED_DIFFS = {
-    "ProcHMI.out": {"count": 93, "desc": "iPod auth retry: 2 jump sites + code cave"},
+    "ProcHMI.out": {"count": 96, "desc": "iPod auth retry v2: 2 jump sites + code cave (disconnect-only, stack-safe)"},
     "sysprogosalio.out": {"count": 3, "desc": "SD CID bypass: bnez→nop"},
 }
 

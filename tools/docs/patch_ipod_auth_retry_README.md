@@ -1,4 +1,4 @@
-# patch_ipod_auth_retry.py — iPod/iPhone MFi Auth Retry Patch
+# patch_ipod_auth_retry.py — iPod/iPhone MFi Auth Retry Patch (v2)
 
 Binary patch for `ProcHMI.elf` that fixes intermittent iPhone USB connectivity
 on the Opel Navi 600/900 (firmware v2.08).
@@ -18,11 +18,31 @@ Injects a 26-instruction (104-byte) code cave into an unused region of
 `ProcHMI.elf` and redirects both auth failure handlers to it. The code cave:
 
 1. Loads a retry counter from an unused byte in the coordinator object (`+0x5CE`)
-2. If counter < 5: increments it, calls `iPod_cmd_disconnect`, busy-waits
-   ~150ms, clears the "already initialized" flag, calls `iPod_cmd_connect`,
-   and returns from the callback — the new auth result arrives as a fresh callback
-3. If counter >= 5: resets the counter and falls through to the original error
-   handling path
+2. If counter < 5: increments it, calls `iPod_cmd_disconnect` to cleanly tear
+   down the failed session, clears the "already initialized" flag, sets the
+   coordinator state machine to the error state (0x13), sets the stack safety
+   flag `0x20($sp)` to prevent a dangerous call to `0x4e6ee4`, and returns
+   through `CALLBACK_EXIT`
+3. If counter >= 5: resets the counter, sets the same safety flags, and returns
+   through `CALLBACK_EXIT` (gives up cleanly)
+
+The firmware's USB detection layer notices the device is still physically
+connected, triggers a new attach event, and starts a fresh MFi auth session
+through the proper coordinator init code path (`0x4ec40c`). This avoids the
+race conditions and stale-state crashes that occurred in the v1 patch.
+
+### v2 changes (crash fix)
+
+The v1 patch had three critical bugs:
+- Called `iPod_cmd_connect` from within the callback (caused stale coordinator
+  state and crash on USB disconnect)
+- Used a ~150ms busy-wait loop (blocked event processing, caused queued
+  disconnect events to hit stale state)
+- Did not set the `0x20($sp)` safety flag on the give-up path (allowed a
+  dangerous call to `0x4e6ee4` with potentially freed pointers)
+
+v2 removes all three: disconnect-only, no busy-wait, stack safety flags on
+every exit path.
 
 ## Patch Sites
 
@@ -32,18 +52,16 @@ Injects a 26-instruction (104-byte) code cave into an unused region of
 | `0x004F077C` | Event 2 handler: 3 instructions replaced with `j 0x9A87A0` + 2x `nop` | 12 bytes |
 | `0x009A87A0` | Code cave: 26 MIPS instructions (was all zeros) | 104 bytes |
 
-Total: 93 non-zero byte changes (the `nop` instructions at the jump sites
-contribute zero bytes that were previously non-zero).
+Total: 96 non-zero byte changes at the ELF level.
 
 ## Key Addresses
 
 | Symbol | Address | Purpose |
 |--------|---------|---------|
 | `iPod_cmd_disconnect` | `0x004F5C88` | Tears down the iAP session |
-| `iPod_cmd_connect` | `0x004F5D34` | Starts a new iAP session with fresh MFi auth |
 | `INIT_FLAG_ADDR` | `0x089985F0` | Global "already initialized" flag — cleared to allow reinit |
-| `CALLBACK_EPILOG` | `0x004F0B9C` | Normal callback return path |
-| `CALLBACK_EXIT` | `0x004F0AA0` | Give-up exit path (original behavior) |
+| `CALLBACK_EXIT` | `0x004F0AA0` | Exit path — checks `0x20($sp)` flag, then epilog |
+| `ERROR_STATE` | `0x13` | Coordinator state machine error/recovery state |
 
 ## Usage
 
@@ -99,36 +117,54 @@ Or use the all-in-one script: `bash tools/build_patch.sh /path/to/ProcHMI.out`
 - Applies identically to both Navi 600 (`g__eeu10`) and Navi 900 (`g_mpeu10`)
   — the `ProcHMI.out` modules are byte-identical across variants
 
-## MIPS Code Cave Listing
+## MIPS Code Cave Listing (v2)
 
 The 26 instructions injected at `0x009A87A0`:
 
 ```
+; --- Retry check ---
 0x9A87A0: lbu   $v0, 0x5CE($s1)      ; load retry counter
 0x9A87A4: sltiu $v1, $v0, 5           ; v1 = (counter < 5)
 0x9A87A8: beqz  $v1, give_up          ; if >= 5 retries, give up
 0x9A87AC: addiu $v0, $v0, 1           ; increment counter (delay slot)
+
+; --- Retry path ---
 0x9A87B0: sb    $v0, 0x5CE($s1)       ; save incremented counter
 0x9A87B4: lw    $a0, 0x18($s1)        ; load IAPInterface pointer
 0x9A87B8: beqz  $a0, give_up          ; if NULL, give up
 0x9A87BC: nop
 0x9A87C0: jal   iPod_cmd_disconnect   ; tear down failed session
 0x9A87C4: nop
-0x9A87C8: lui   $v0, 0x0100           ; delay loop: ~16M iterations
-0x9A87CC: addiu $v0, $v0, -1          ; decrement
-0x9A87D0: bnez  $v0, -2               ; spin wait ~100-250ms
-0x9A87D4: nop
-0x9A87D8: lui   $v0, 0x089A           ; load INIT_FLAG_ADDR high
-0x9A87DC: sb    $zero, -0x7A10($v0)   ; clear init flag
-0x9A87E0: lw    $a0, 0x18($s1)        ; reload IAPInterface pointer
-0x9A87E4: beqz  $a0, skip_connect     ; safety check
+0x9A87C8: lui   $v0, 0x089A           ; INIT_FLAG_ADDR high (0x089985F0)
+0x9A87CC: sb    $zero, -0x7A10($v0)   ; clear init flag → allows reinit
+0x9A87D0: addiu $v0, $zero, 0x13      ; v0 = 19 (error state)
+0x9A87D4: sw    $v0, 0x60($s1)        ; coordinator state = 19
+0x9A87D8: addiu $v0, $zero, 1         ; v0 = 1
+0x9A87DC: sb    $v0, 0x20($sp)        ; skip dangerous 4e6ee4 call
+0x9A87E0: move  $s4, $zero            ; suppress error publication
+0x9A87E4: j     CALLBACK_EXIT         ; safe return through exit path
 0x9A87E8: nop
-0x9A87EC: jal   iPod_cmd_connect      ; start fresh MFi auth session
-0x9A87F0: nop
-0x9A87F4: j     CALLBACK_EPILOG       ; return from callback
-0x9A87F8: move  $v0, $zero            ; return 0 (delay slot)
+
+; --- Give-up path ---
 give_up:
-0x9A87FC: sb    $zero, 0x5CE($s1)     ; reset retry counter
-0x9A8800: j     CALLBACK_EXIT         ; original error exit path
-0x9A8804: move  $s4, $zero            ; no publish (delay slot)
+0x9A87EC: sb    $zero, 0x5CE($s1)     ; reset retry counter
+0x9A87F0: addiu $v0, $zero, 0x13      ; v0 = 19 (error state)
+0x9A87F4: sw    $v0, 0x60($s1)        ; coordinator state = 19
+0x9A87F8: addiu $v0, $zero, 1         ; v0 = 1
+0x9A87FC: sb    $v0, 0x20($sp)        ; skip 4e6ee4 even on give-up
+0x9A8800: j     CALLBACK_EXIT         ; normal exit (4e6ee4 skipped)
+0x9A8804: move  $s4, $zero            ; suppress publication (delay slot)
 ```
+
+### CALLBACK_EXIT safety mechanism
+
+The exit path at `0x4F0AA0` contains:
+```
+0x4F0AA0: lbu  $v0, 0x20($sp)        ; load skip flag
+0x4F0AA4: bnel $v0, $zero, 0x4F0AD8  ; if set → skip dangerous call
+0x4F0AB8: jal  0x4e6ee4              ; called with 0x10($s1) — CRASHES if stale
+```
+
+Setting `0x20($sp) = 1` on all code cave exit paths prevents the `4e6ee4`
+call from executing with potentially freed or stale pointers, which was the
+root cause of the crash on USB disconnect.

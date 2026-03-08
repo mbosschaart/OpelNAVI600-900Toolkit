@@ -477,8 +477,8 @@ is not supported." The MFi authentication handshake fails intermittently due
 to timing, and the firmware has no retry logic — it logs the error and gives up.
 
 **Fix:** A 93-byte MIPS code patch injected into `ProcHMI.elf` that intercepts
-both auth failure handlers and adds automatic disconnect → delay → reconnect
-retry logic (up to 5 attempts).
+both auth failure handlers and adds automatic disconnect → reinit retry logic
+(up to 5 attempts).
 
 | Location | Description |
 |----------|-------------|
@@ -486,9 +486,14 @@ retry logic (up to 5 attempts).
 | `0x004f077c` | Auth Failed handler → jump to retry code cave |
 | `0x009a87a0` | Code cave: 26 MIPS instructions implementing retry logic |
 
-The code cave performs: load retry counter → disconnect iAP session →
-busy-wait ~150ms → clear init flag → reconnect → return. After 5 failures,
-falls through to original behavior. Full technical breakdown in the patch
+The v2 code cave performs: load retry counter → disconnect iAP session →
+clear init flag → set coordinator state to error state (0x13) → set stack
+safety flag `0x20($sp)` to prevent dangerous `0x4e6ee4` call → return through
+`CALLBACK_EXIT`. The firmware's USB detection layer then notices the device is
+still physically connected, triggers a new attach event, and starts a fresh
+MFi auth session through the proper coordinator init code path. After 5
+failures, the retry counter resets and the code falls through to original
+behavior (with safety flags still set). Full technical breakdown in the patch
 tool source: [`tools/patch_ipod_auth_retry.py`](tools/patch_ipod_auth_retry.py).
 
 ### Patch 2: SD Card CID Bypass
