@@ -400,10 +400,20 @@ def check_verify_all(iso_path: str, variant: str) -> bool:
 
         actual_crc = binascii.crc32(decompressed) & 0xFFFFFFFF
         if actual_crc != stored_crc:
-            fail(f"{fname}: CRC mismatch (stored=0x{stored_crc:08X} actual=0x{actual_crc:08X})")
+            fail(f"{fname}: content CRC mismatch (stored=0x{stored_crc:08X} actual=0x{actual_crc:08X})")
             passed = False
-        else:
-            ok(f"{fname}: decompress OK, CRC32 0x{actual_crc:08X} verified ({len(decompressed):,} bytes)")
+            continue
+
+        # Whole-file CRC32 (bIsFileValid) — last 4 bytes of the file
+        if len(data) >= 4:
+            file_crc = binascii.crc32(data[:-4]) & 0xFFFFFFFF
+            file_stored = struct.unpack_from("<I", data, len(data) - 4)[0]
+            if file_crc != file_stored:
+                fail(f"{fname}: bIsFileValid CRC mismatch (stored=0x{file_stored:08X} computed=0x{file_crc:08X})")
+                passed = False
+                continue
+
+        ok(f"{fname}: decompress OK, CRC32 0x{actual_crc:08X}, bIsFileValid OK ({len(decompressed):,} bytes)")
 
     return passed
 
