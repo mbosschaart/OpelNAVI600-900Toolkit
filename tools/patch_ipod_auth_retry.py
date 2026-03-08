@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 """
-Patch ProcHMI.elf to add automatic retry on MFi authentication failure.
+Patch ProcHMI.elf for graceful MFi authentication failure handling (v3).
 
 Problem:
-  iPhone connection to the Navi600/900 is intermittent. The MFi authentication
-  handshake can fail due to timing, requiring up to 10 physical USB reconnects.
-  The firmware logs the error but immediately gives up without retrying.
+  When an iPhone's MFi authentication fails (common with newer iPhones that
+  have reduced or no iAP1 support), the firmware's error handler goes through
+  a complex epilog path (CALLBACK_EXIT at 0x4f0aa0) that accesses the device
+  object pointer at 0x10($s1). If the user then unplugs the cable, the USB
+  removal handler fires while the coordinator is in a half-torn-down state,
+  causing a null/stale pointer crash that reboots the head unit.
 
-Fix:
+Fix (v3 — graceful failure, no disconnect, no retry):
   Redirects both auth failure handlers (event=1 "Auth CP Error" and event=2
   "Authentication Failed") in iPodCtrlCoordinator::onMediaDeviceCallback to a
-  code cave that:
-    1. Maintains a retry counter (up to 5 attempts)
-    2. Calls iPod_cmd_disconnect to tear down the failed session cleanly
-    3. Clears the "already initialized" flag so the firmware reinits on
-       USB re-detection (the device is still physically on the bus)
-    4. Transitions the state machine to the error state (0x13) to keep
-       the coordinator object consistent
-    5. Sets the stack safety flag 0x20($sp) to prevent a dangerous call
-       to 0x4e6ee4 with stale pointers
-    6. Returns through CALLBACK_EXIT; the firmware detects the still-
-       connected USB device, triggers a new attach event, and starts
-       a fresh MFi auth session through the proper init code path
+  minimal code cave that:
+    1. Clears the "already initialized" flag so a future re-plug starts fresh
+    2. Sets the coordinator state to 0x13 (error/terminal state)
+    3. Jumps directly to the function epilog (register restore + return at
+       0x4f0b9c), bypassing ALL of CALLBACK_EXIT
 
-  The reconnect is handled entirely by the firmware's own USB detection
-  and coordinator init function (0x4ec40c), not by calling iPod_cmd_connect
-  from within the callback. This avoids the race conditions and stale-state
-  crashes that occurred in the v1 patch.
+  This approach does NOT call iPod_cmd_disconnect (which was causing the crash
+  by tearing down the device object that the USB removal handler later tries
+  to access). The device object remains untouched — the USB removal handler
+  can safely clean it up when the cable is physically disconnected.
+
+  v3 changes (crash fix):
+    - Removed iPod_cmd_disconnect call (root cause of the crash)
+    - Removed retry counter logic (can't help — iAP1 incompatible phones
+      will never pass MFi auth regardless of retries)
+    - Removed stack safety flag (unnecessary — we bypass CALLBACK_EXIT entirely)
+    - Jump target changed from CALLBACK_EXIT (0x4f0aa0) to direct epilog
+      (0x4f0b9c), avoiding all code that touches the device pointer
 
 Patch Sites:
   0x004f0714: event=1 handler -> jump to code cave (replaces 3 instructions)
   0x004f077c: event=2 handler -> jump to code cave (replaces 3 instructions)
-  0x009a87a0: code cave (26 instructions in .fini/.rodata gap, was all zeros)
+  0x009a87a0: code cave (6 instructions / 24 bytes in .fini/.rodata gap)
 
 Usage:
   python3 patch_ipod_auth_retry.py <input.elf> <output.elf>
@@ -77,9 +81,7 @@ def MOVE(rd, rs):          return _r(0, R[rs], 0, R[rd], 0, 0x21)
 CODE_CAVE       = 0x009A87A0
 PATCH1_ADDR     = 0x004F0714
 PATCH2_ADDR     = 0x004F077C
-RETRY_OFFSET    = 0x5CE       # unused byte in coordinator object
-CALLBACK_EXIT   = 0x004F0AA0  # checks 0x20($sp) flag, then epilog
-DISCONNECT_FN   = 0x004F5C88  # iPod_cmd_disconnect(IAPInterface*)
+EPILOG_RETURN   = 0x004F0B9C  # register restore + jr $ra + sp cleanup
 INIT_FLAG_ADDR  = 0x089985F0  # "already initialized" global flag
 ERROR_STATE     = 0x13        # coordinator state machine error state
 
@@ -88,56 +90,31 @@ ORIGINAL_PATCH2 = bytes.fromhex("6000228e13004228f4ff4050")
 
 
 def build_cave() -> bytes:
-    """Build the v2 code cave — disconnect-only, no busy-wait, stack-safe.
+    """Build the v3 code cave — graceful failure, no disconnect, no retry.
 
-    Layout (26 instructions, 104 bytes):
-      [0-3]   Retry check: load counter, compare < 5, branch give-up
-      [4-18]  Retry path:  disconnect, clear init flag, set state=19,
-              set safety flags, jump CALLBACK_EXIT
-      [19-25] Give-up path: reset counter, set state=19, set safety flag,
-              jump CALLBACK_EXIT
+    Layout (6 instructions, 24 bytes):
+      [0-1]  Clear "already initialized" flag (future re-plug starts fresh)
+      [2-3]  Set coordinator state to 19 (error/terminal)
+      [4-5]  Jump directly to function epilog (register restore + return)
+
+    Does NOT call iPod_cmd_disconnect — the device object stays valid so
+    the USB removal handler can safely clean it up on cable disconnect.
+    Bypasses CALLBACK_EXIT entirely — no code touches the device pointer.
     """
     cave = bytearray()
-
-    # --- Retry check (instructions 0-3) ---
-    cave += LBU("v0", RETRY_OFFSET, "s1")     # 0: load retry counter
-    cave += SLTIU("v1", "v0", 5)              # 1: v1 = (counter < 5)
-    cave += BEQZ("v1", 16)                    # 2: if >= 5 → give_up @19
-    cave += ADDIU("v0", "v0", 1)              # 3: increment (delay slot)
-
-    # --- Retry path (instructions 4-18) ---
-    cave += SB("v0", RETRY_OFFSET, "s1")      # 4: save incremented counter
-    cave += LW("a0", 0x18, "s1")              # 5: load IAPInterface ptr
-    cave += BEQZ("a0", 12)                    # 6: if NULL → give_up @19
-    cave += NOP()                              # 7: (delay slot)
-    cave += JAL(DISCONNECT_FN)                 # 8: tear down failed session
-    cave += NOP()                              # 9: (delay slot)
 
     hi = (INIT_FLAG_ADDR >> 16) & 0xFFFF
     lo = INIT_FLAG_ADDR & 0xFFFF
     if lo >= 0x8000:
         hi = (hi + 1) & 0xFFFF
         lo = lo - 0x10000
-    cave += LUI("v0", hi)                     # 10: upper addr of init flag
-    cave += SB("zero", lo, "v0")              # 11: clear init flag
 
-    cave += ADDIU("v0", "zero", ERROR_STATE)  # 12: v0 = 19
-    cave += SW("v0", 0x60, "s1")              # 13: coordinator state = 19
-
-    cave += ADDIU("v0", "zero", 1)            # 14: v0 = 1
-    cave += SB("v0", 0x20, "sp")              # 15: skip dangerous 4e6ee4 call
-    cave += MOVE("s4", "zero")                # 16: suppress error publication
-    cave += J(CALLBACK_EXIT)                   # 17: return through safe exit
-    cave += NOP()                              # 18: (delay slot)
-
-    # --- Give-up path (instructions 19-25) ---
-    cave += SB("zero", RETRY_OFFSET, "s1")    # 19: reset retry counter
-    cave += ADDIU("v0", "zero", ERROR_STATE)  # 20: v0 = 19
-    cave += SW("v0", 0x60, "s1")              # 21: coordinator state = 19
-    cave += ADDIU("v0", "zero", 1)            # 22: v0 = 1
-    cave += SB("v0", 0x20, "sp")              # 23: skip 4e6ee4 even on give-up
-    cave += J(CALLBACK_EXIT)                   # 24: normal exit path
-    cave += MOVE("s4", "zero")                # 25: suppress publish (delay slot)
+    cave += LUI("v0", hi)                     # 0: upper addr of init flag
+    cave += SB("zero", lo, "v0")              # 1: clear init flag
+    cave += ADDIU("v0", "zero", ERROR_STATE)  # 2: v0 = 19
+    cave += SW("v0", 0x60, "s1")              # 3: coordinator state = 19
+    cave += J(EPILOG_RETURN)                   # 4: jump to register restore + return
+    cave += ADDIU("v0", "zero", 1)            # 5: delay slot: return value = 1
 
     return bytes(cave)
 
@@ -160,7 +137,8 @@ def apply_patch(data: bytes) -> bytes:
             "File may already be patched or is the wrong version."
         )
 
-    cave_region = data[CODE_CAVE:CODE_CAVE + 128]
+    cave_size = len(build_cave())
+    cave_region = data[CODE_CAVE:CODE_CAVE + cave_size]
     if any(b != 0 for b in cave_region):
         raise ValueError(
             f"Code cave region (0x{CODE_CAVE:08x}) is not empty. "
