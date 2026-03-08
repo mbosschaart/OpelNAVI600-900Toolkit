@@ -2,6 +2,8 @@
 
 > **WARNING:** These scripts are provided for educational purposes only, and use of them is solely the risk of the user. **YOU MAY BRICK YOUR UNIT REQUIRING PROFESSIONAL RECOVERY.**
 
+> **DEVELOPMENT STATUS:** The iPod/iPhone connectivity patch and SD card CID bypass patch are currently in development and do not work reliably. Test at your own risk.
+
 A reverse engineering toolkit for the **Opel/Vauxhall Navi 600 and Navi 900**
 head units (GM-GE platform, manufactured by Bosch). Provides tools to
 decompress, inspect, disassemble, modify, and repackage the firmware — turning
@@ -206,14 +208,16 @@ python3 tools/extract_all_uli.py
 
 Documentation: [`tools/docs/extract_all_uli_README.md`](tools/docs/extract_all_uli_README.md)
 
-### patch_ipod_auth_retry.py — iPod/iPhone Auth Retry Patch (v3.1)
+### patch_ipod_auth_retry.py — iPod/iPhone Auth Retry Patch (v3.2)
 
-Adds automatic MFi authentication retry with crash-safe coordinator reset.
-On auth failure, calls the firmware's own coordinator reset function
-(`function_4ec608`) and clears the init flag, allowing the firmware's timer
-chain to re-detect the device and retry (up to 3 attempts). Gives up
-gracefully after 3 failures. All paths bypass `CALLBACK_EXIT` entirely,
-preventing the stale-pointer crash on USB disconnect.
+Adds automatic MFi authentication retry with crash-safe coordinator reset
+and HMI progress display. On auth failure, calls the firmware's own
+coordinator reset function (`function_4ec608`), shows "iPod wordt
+gecontroleerd" on the head unit display via DataPool write, and clears
+the init flag. The firmware's timer chain re-detects the device and retries
+(up to 3 attempts). On give-up, hides the loading overlay and sets the
+error state. All paths bypass `CALLBACK_EXIT` entirely, preventing the
+stale-pointer crash on USB disconnect.
 
 ```bash
 python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
@@ -475,38 +479,41 @@ The bootloader at `0x4ab68` in `dragon.bin` identifies file types by magic:
 This toolkit includes two production-ready binary patches for firmware v2.08,
 plus everything needed to build and verify a complete patched firmware ISO.
 
-### Patch 1: iPod/iPhone Auth Retry + Crash Fix (v3.1)
+### Patch 1: iPod/iPhone Auth Retry + Crash Fix + HMI Display (v3.2)
 
 **Problem:** When an iPhone's MFi authentication fails (common with newer
 iPhones that have reduced or no iAP1 support), the firmware gives up without
-retrying. Additionally, the error handler's epilog accesses device object
-pointers that become stale if the cable is unplugged, crashing the head unit.
+retrying. The error handler's epilog accesses device object pointers that
+become stale if the cable is unplugged, crashing the head unit. And the user
+gets no visual feedback that anything is happening.
 
 **Note:** The Navi 600/900 uses iAP1 (iPod Accessory Protocol v1) only.
 USB-C era iPhones have dropped iAP1 support and will always show "This
 accessory is not compatible." This patch cannot fix the protocol
-incompatibility, but it prevents crashes and retries for Lightning iPhones
-where MFi auth is timing-sensitive.
+incompatibility, but it prevents crashes, retries for Lightning iPhones
+where MFi auth is timing-sensitive, and provides visual feedback.
 
-**Fix (v3.1):** A 64-byte code cave in `ProcHMI.elf` that intercepts both
-auth failure handlers with automatic retry and crash-safe coordinator reset:
+**Fix (v3.2):** A 96-byte code cave in `ProcHMI.elf` that intercepts both
+auth failure handlers with automatic retry, coordinator reset, and HMI
+progress display:
 
 | Location | Description |
 |----------|-------------|
 | `0x004f0714` | Auth CP Error handler → jump to code cave |
 | `0x004f077c` | Auth Failed handler → jump to code cave |
-| `0x009a87a0` | Code cave: 16 instructions — retry counter + coordinator reset + epilog |
+| `0x009a87a0` | Code cave: 24 instructions — retry + reset + display + epilog |
 
 **How it works:** On auth failure, the code cave increments a retry counter
 (stored at coordinator+`0x5CE`). If under 3 attempts, it calls
-`function_4ec608` — the firmware's **own coordinator reset function** (used
-during normal iPod detach and undervoltage recovery) — then clears the global
-init flag (`g1215`). The firmware's timer chain (Timer 2 @ 2s, Timer 1 @ 5s)
+`function_4ec608` — the firmware's **own coordinator reset function** — then
+shows "iPod wordt gecontroleerd" on the head unit display by writing to
+DataPool ID `0x5000165` via `function_987c`, then clears the global init flag
+(`g1215`). The firmware's timer chain (Timer 2 @ 2s, Timer 1 @ 5s)
 re-detects the still-connected USB device and triggers fresh initialization
-with a new MFi auth attempt. After 3 failed attempts, it gives up gracefully
-(state = 0x13/error). All paths bypass `CALLBACK_EXIT` entirely — no device
-pointer is ever accessed, preventing the stale-pointer crash on cable
-disconnect. Full technical breakdown:
+with a new MFi auth attempt. After 3 failed attempts, it hides the loading
+overlay and sets the error state (0x13). All paths bypass `CALLBACK_EXIT`
+entirely — no device pointer is ever accessed, preventing the stale-pointer
+crash on cable disconnect. Full technical breakdown:
 [`tools/docs/patch_ipod_auth_retry_README.md`](tools/docs/patch_ipod_auth_retry_README.md).
 
 ### Patch 2: SD Card CID Bypass
