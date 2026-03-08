@@ -13,7 +13,9 @@ XOZL format (36-byte header + LZO1X compressed payload + version trailer):
   0x1C  comp_size     u32   LZO compressed payload size in bytes
   0x20  crc32         u32   CRC32 of the decompressed content (init=0)
   0x24  [payload]           LZO1X compressed data
-  0x24+comp_size [trailer]  version string (e.g. "GM10.8V208") + metadata
+  0x24+comp_size [trailer]  version string + metadata + whole-file CRC32
+                            Last 4 bytes: CRC32(file[:-4]) — integrity check
+                            used by the RUL Testmanager ("bIsFileValid")
 
 Commands:
   info    <file.out>                       Print XOZL metadata as JSON
@@ -129,7 +131,18 @@ def cmd_pack(elf_path: Path, out_path: Path, ref_path: Path | None) -> None:
     struct.pack_into("<I", header, 0x1C, len(lzo_stream))
     struct.pack_into("<I", header, 0x20, crc)
 
-    result = bytes(header) + lzo_stream + trailer
+    # The last 4 bytes of the trailer are a whole-file CRC32 checked by the
+    # RUL Testmanager (bIsFileValid). Strip them, assemble the file, then
+    # recompute and append the correct CRC.
+    if len(trailer) >= 4:
+        trailer_body = trailer[:-4]
+    else:
+        trailer_body = trailer
+
+    file_without_crc = bytes(header) + lzo_stream + trailer_body
+    file_crc = binascii.crc32(file_without_crc) & 0xFFFFFFFF
+    result = file_without_crc + struct.pack("<I", file_crc)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(result)
 
@@ -137,9 +150,10 @@ def cmd_pack(elf_path: Path, out_path: Path, ref_path: Path | None) -> None:
     print(f"  ELF size:        {len(elf_data):>12,}")
     print(f"  Compressed:      {len(lzo_stream):>12,}")
     print(f"  XOZL .out size:  {len(result):>12,}")
-    print(f"  CRC32:           0x{crc:08x}")
-    if trailer:
-        print(f"  Trailer:         {trailer.rstrip(b'\x00\x01').decode('ascii', errors='replace')!r}")
+    print(f"  CRC32 (decomp):  0x{crc:08x}")
+    print(f"  CRC32 (file):    0x{file_crc:08x}")
+    if trailer_body:
+        print(f"  Trailer:         {trailer_body.rstrip(b'\\x00\\x01').decode('ascii', errors='replace')!r}")
 
 
 def main() -> None:

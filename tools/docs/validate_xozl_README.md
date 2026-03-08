@@ -9,12 +9,17 @@ is structurally correct and will be accepted by the Navi 600/900 bootloader.
 |---|------|----------------|
 | 1 | Header structure | Magic bytes, version, reserved fields, header length, size consistency |
 | 2 | LZO decompression | Payload decompresses successfully with standard LZO1X |
-| 3 | CRC32 integrity | Decompressed content CRC matches the header value |
+| 3 | Content CRC32 | Decompressed content CRC matches the header value (offset `0x20`) |
 | 4 | Size verification | Decompressed size matches the header's `decomp_size` field |
 | 5 | ELF magic | Decompressed output starts with `\x7fELF` |
 | 6 | Cross-validation | Byte-for-byte comparison with a known-good decompressed ELF (when `--elf` given) |
 | 7 | Header comparison | Field-by-field comparison with the original `.out` (when `--ref` given) |
 | 8 | Original compatibility | Confirms the original also decompresses with standard LZO1X |
+
+Note: The **whole-file CRC32** (last 4 bytes of the trailer, checked by the RUL
+Testmanager's `bIsFileValid`) is automatically correct when using `xozl_tool.py
+pack`. The `build_iso.py` staging validation additionally verifies this CRC for
+all `.out` files before building the ISO.
 
 ## Usage
 

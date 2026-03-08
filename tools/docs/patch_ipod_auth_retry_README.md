@@ -79,7 +79,7 @@ python3 tools/patch_ipod_auth_retry.py ProcHMI.elf ProcHMI_patched.elf
 # 3. Verify
 python3 tools/patch_ipod_auth_retry.py --verify ProcHMI_patched.elf
 
-# 4. Repack into XOZL (using original as reference for header/trailer)
+# 4. Repack into XOZL (recomputes both content CRC and whole-file CRC)
 python3 tools/xozl_tool.py pack ProcHMI_patched.elf ProcHMI_patched.out --ref ProcHMI.out
 
 # 5. Validate the XOZL output

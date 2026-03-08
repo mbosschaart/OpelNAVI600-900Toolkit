@@ -19,6 +19,7 @@ ProcHMI_patched.elf
     │
     ▼  Step 4: xozl_tool.py pack --ref
 ProcHMI_patched.out (repackaged XOZL)
+    │  (content CRC32 + whole-file CRC32 both recomputed)
     │
     ▼  Step 5: validate_xozl.py --elf --ref
     │  (full XOZL validation suite)
@@ -54,9 +55,9 @@ After the build completes:
 
 1. Copy `build/ProcHMI_patched.out` as `ProcHMI.out` into both variant
    directories (`g__eeu10` and `g_mpeu10`) in your firmware update tree
-2. Build the ISO: `mkisofs -o patched.iso -V CDROM -sysid Win32 -J -R -l staging/`
+2. Build the ISO using `build_iso.py` (validates whole-file CRC automatically)
 3. Optionally run `verify_patched_iso.py` for full ISO-level verification
-4. Burn or mount the ISO and update the head unit via USB
+4. Burn or mount the ISO and update the head unit via CD/DVD
 
 ## Dependencies
 

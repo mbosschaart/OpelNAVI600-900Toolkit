@@ -86,9 +86,13 @@ variant directory against the original ISO and reports:
 - **Missing files**: present in original but not in staging (likely an error)
 - **Extra files**: present in staging but not in original (may be intentional)
 
-The tool also performs basic XOZL integrity checks on all `.out` files:
-verifies the XOZL magic bytes and confirms the compressed payload size is
-consistent with the file size.
+The tool also performs XOZL integrity checks on all `.out` files:
+- Verifies the XOZL magic bytes
+- Confirms the compressed payload size is consistent with the file size
+- **Validates the whole-file CRC32** (the `bIsFileValid` check): computes
+  `CRC32(file[0..N-4])` and compares against the last 4 bytes. This is the
+  same check the RUL Testmanager performs during firmware updates — files
+  failing this check are rejected with "File(s) Tainted"
 
 ## Dependencies
 
@@ -114,6 +118,9 @@ consistent with the file size.
   Staged 2 variant(s), 112 files (4 replaced), 108.3 MB total
 
 --- Step 2: Validate staging ---
+  OK:   g__eeu10/ProcBase.out bIsFileValid CRC pass
+  OK:   g__eeu10/ProcHMI.out bIsFileValid CRC pass
+  ...
   Staging validation: PASS
 
 --- Step 3: Build ISO ---

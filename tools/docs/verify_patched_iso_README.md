@@ -37,7 +37,10 @@ expected to differ (due to recompression).
 **Test 4 (`verify all`):** Simulates the bootloader's `verify all` command.
 For every `.out` file in both variants: reads the XOZL header, decompresses
 the LZO payload using native `liblzo2` (via ctypes), verifies the output size,
-and computes CRC32 to compare against the header value.
+and computes CRC32 to compare against the header value. Note: this tests the
+content CRC (header offset `0x20`). The whole-file CRC (last 4 bytes, checked
+by `bIsFileValid` in the RUL Testmanager) is verified during the `build_iso.py`
+staging step.
 
 **Test 5 (NAND capacity):** Sums all file sizes in each variant directory and
 reports NAND utilization as a percentage of the 64 MB flash. Fails if the total
@@ -110,4 +113,5 @@ The tool searches for `liblzo2` in standard paths:
 | NAND utilization (Navi 600) | ~78.8% |
 | NAND utilization (Navi 900) | ~84.6% |
 | Cross-variant consistency | Byte-identical |
-| All CRC32 checks | Pass |
+| All content CRC32 checks | Pass |
+| All whole-file CRC32 checks (bIsFileValid) | Pass |

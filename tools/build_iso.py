@@ -27,6 +27,7 @@ Requires: mkisofs (from cdrtools: brew install cdrtools)
 from __future__ import annotations
 
 import argparse
+import binascii
 import os
 import shutil
 import struct
@@ -137,18 +138,24 @@ def verify_staging(staging: Path, original_iso: Path | None) -> bool:
 
         out_files = [f for f in vdir.iterdir() if f.suffix == ".out"]
         for out_file in out_files:
-            with open(out_file, "rb") as f:
-                magic = f.read(4)
+            data = out_file.read_bytes()
+            magic = data[:4]
             if magic == b"XOZL":
-                with open(out_file, "rb") as f:
-                    hdr = f.read(0x24)
-                comp_size = struct.unpack_from("<I", hdr, 0x1C)[0]
-                hdr_len = struct.unpack_from("<I", hdr, 0x14)[0]
-                file_size = out_file.stat().st_size
-                if file_size < hdr_len + comp_size:
+                comp_size = struct.unpack_from("<I", data, 0x1C)[0]
+                hdr_len = struct.unpack_from("<I", data, 0x14)[0]
+                if len(data) < hdr_len + comp_size:
                     print(f"  FAIL: {variant}/{out_file.name} truncated "
-                          f"({file_size} < {hdr_len + comp_size})")
+                          f"({len(data)} < {hdr_len + comp_size})")
                     ok = False
+                elif len(data) >= 4:
+                    computed = binascii.crc32(data[:-4]) & 0xFFFFFFFF
+                    stored = struct.unpack_from("<I", data, len(data) - 4)[0]
+                    if computed != stored:
+                        print(f"  FAIL: {variant}/{out_file.name} whole-file CRC mismatch "
+                              f"(stored 0x{stored:08x}, computed 0x{computed:08x})")
+                        ok = False
+                    else:
+                        print(f"  OK:   {variant}/{out_file.name} bIsFileValid CRC pass")
             elif magic == b"\x7fELF":
                 pass
             else:

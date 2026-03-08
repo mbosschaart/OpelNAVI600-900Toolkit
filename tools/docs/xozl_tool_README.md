@@ -33,6 +33,8 @@ into RAM, verifies the CRC32, and then loads it as a MIPS ELF.
 ├──────────────────────────────────────────────────────┤  ← offset 0x24 + comp_size
 │  Version trailer (variable length)                   │
 │  e.g. "GM10.8V208" + binary metadata                 │
+│  ...                                                 │
+│  Last 4 bytes: CRC32 of file[0..file_size-5]         │  ← whole-file integrity CRC
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -65,15 +67,30 @@ raw LZO stream expected by the XOZL format.
 ### Version trailer
 
 After the compressed payload, the file contains a version trailer. For Navi
-600/900 firmware v2.08, this is the ASCII string `GM10.8V208` followed by binary
-metadata (flags, version fields). The trailer is not part of the compressed data
-and is not covered by the CRC32.
+600/900 firmware v2.08, this is the ASCII string `GM10.8V208` (or
+`TE_PLATTFORM_12.0S42` for sysprog modules) followed by binary metadata
+(flags, version fields).
 
-### CRC32
+**Critically, the last 4 bytes of the trailer are a whole-file CRC32:**
+`CRC32(file[0 .. file_size-5])`. This covers the entire file — header,
+compressed payload, and trailer body — minus the CRC itself. This is checked
+by the `bIsFileValid()` function in the RUL Testmanager during firmware updates.
+If it does not match, the update fails with **"File(s) Tainted"**.
 
-The CRC32 in the header is computed over the **decompressed** ELF content, not
-the compressed payload. It uses standard CRC32 with init value 0 (Python:
-`binascii.crc32(data, 0) & 0xFFFFFFFF`).
+The trailer is not part of the compressed data and is not covered by the header
+CRC32 at offset `0x20`.
+
+### CRC32 fields
+
+There are **two separate CRC32 values** in every XOZL `.out` file:
+
+| CRC | Location | Covers | Checked by |
+|-----|----------|--------|------------|
+| Content CRC32 | Header offset `0x20` | Decompressed ELF data | `dragon.bin` bootloader |
+| File CRC32 | Last 4 bytes of trailer | Entire file minus last 4 bytes | RUL Testmanager (`bIsFileValid`) |
+
+Both use standard CRC32 (polynomial 0xEDB88320, init=0). In Python:
+`binascii.crc32(data, 0) & 0xFFFFFFFF`.
 
 ## Commands
 
@@ -133,15 +150,17 @@ python3 xozl_tool.py pack ProcHMI_patched.elf ProcHMI_patched.out --ref ProcHMI.
 ```
 
 **The `--ref` flag** (recommended): copies the 36-byte header template and the
-version trailer from an existing `.out` file. Only the three variable fields
-are updated:
+version trailer from an existing `.out` file. The following fields are updated:
 - `0x18` decomp_size — set to the new ELF size
 - `0x1C` comp_size — set to the new LZO stream size
-- `0x20` crc32 — recomputed from the new ELF content
+- `0x20` crc32 — recomputed from the new ELF content (content CRC)
+- Last 4 bytes of trailer — recomputed whole-file CRC32
 
 This ensures the magic, version numbers, reserved fields, and version trailer
-are identical to the original — the patched file is structurally indistinguishable
-from a factory file except for the payload data and these three fields.
+body are identical to the original — the patched file is structurally
+indistinguishable from a factory file except for the payload data and these
+fields. The whole-file CRC is always recomputed after assembly so that
+`bIsFileValid()` passes during firmware updates.
 
 **Without `--ref`**: the tool constructs a minimal header from scratch using the
 observed default values (ver 1.2, header_len 0x24) and an empty trailer.
@@ -149,16 +168,19 @@ observed default values (ver 1.2, header_len 0x24) and an empty trailer.
 ## How `pack` works internally
 
 ```
-1. Read the input ELF into memory
-2. Compute CRC32 of the ELF (init=0)
-3. Compress with lzo.compress() → produces 5-byte header + LZO stream
-4. Strip the 5-byte python-lzo header to get the raw LZO stream
-5. Round-trip verify: decompress the raw stream, compare with original ELF
-6. If --ref: copy header bytes [0x00..0x23] and trailer from reference .out
-   If no --ref: build header from defaults
-7. Write updated decomp_size, comp_size, crc32 into the header
-8. Concatenate: header (36 bytes) + LZO stream + trailer
-9. Write to output file
+ 1. Read the input ELF into memory
+ 2. Compute content CRC32 of the ELF (init=0)
+ 3. Compress with lzo.compress() → produces 5-byte header + LZO stream
+ 4. Strip the 5-byte python-lzo header to get the raw LZO stream
+ 5. Round-trip verify: decompress the raw stream, compare with original ELF
+ 6. If --ref: copy header bytes [0x00..0x23] and trailer from reference .out
+    If no --ref: build header from defaults
+ 7. Write updated decomp_size, comp_size, content crc32 into the header
+ 8. Strip last 4 bytes from trailer (old whole-file CRC)
+ 9. Assemble: header (36 bytes) + LZO stream + trailer body
+10. Compute CRC32 of the assembled data (whole-file integrity CRC)
+11. Append the 4-byte whole-file CRC
+12. Write to output file
 ```
 
 ## Dependencies
@@ -183,3 +205,14 @@ first 4 bytes:
 The XOZL path decompresses the payload into a memory buffer, then proceeds with
 the same ELF segment loader used by the raw ELF path. Both paths end up at the
 same common loader routine in the bootloader.
+
+### RUL Testmanager (firmware update)
+
+During firmware updates, files are validated by the **RUL Testmanager**
+(`Rul_Testmanager_Rom.bin`), a separate component in NOR flash. Its
+`bIsFileValid()` function computes `CRC32(file[0..N-4])` and compares against
+the last 4 bytes of the file. If they don't match, the file is rejected with
+**"File(s) Tainted"** and the update aborts.
+
+This whole-file CRC is distinct from the content CRC at header offset `0x20`.
+Both must be correct for a firmware update to succeed.

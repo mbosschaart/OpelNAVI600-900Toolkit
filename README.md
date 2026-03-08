@@ -118,9 +118,12 @@ python3 tools/xozl_tool.py pack ProcHMI_patched.elf ProcHMI_patched.out --ref Pr
 ```
 
 The `--ref` flag is key for packing: it copies all header constants and the
-version trailer from the original `.out`, only updating the three fields that
-change (compressed size, decompressed size, CRC32). The result is structurally
-identical to a factory file. Packing includes automatic round-trip verification.
+version trailer from the original `.out`, only updating the fields that change
+(compressed size, decompressed size, content CRC32). It also recomputes the
+**whole-file CRC32** stored in the trailer's last 4 bytes — an integrity check
+used by the RUL Testmanager (`bIsFileValid`) during firmware updates. The result
+is structurally identical to a factory file. Packing includes automatic
+round-trip verification.
 
 Full format specification and implementation details:
 [`tools/docs/xozl_tool_README.md`](tools/docs/xozl_tool_README.md)
@@ -352,6 +355,37 @@ dragon.bin (bootloader, MIPS64)
   └── Transfer control to application modules
 ```
 
+### Firmware Update Process
+
+Firmware updates are handled by the **RUL Testmanager** (`Rul_Testmanager_Rom.bin`),
+a separate bootloader component stored in NOR flash. The update screen shows
+"DOWNLOADER VER." followed by the version date.
+
+```
+CD/DVD inserted
+  │
+  ▼
+RUL Testmanager (NOR flash)
+  ├── 1. Looking for Batch File (sys_dnl.bat/force.sys)
+  ├── 2. Reading Batch File
+  ├── 3. Verifying Batch File (CRC + structure)
+  └── 4. Executing Batch File
+        ├── "verify on" → enables bIsFileValid() for copy commands
+        ├── For each "copy" command:
+        │     ├── Read source file from CD
+        │     ├── bIsFileValid(): compute CRC32(file[0..N-4])
+        │     │     and compare against last 4 bytes of file
+        │     │     → FAIL: "File(s) Tainted"
+        │     └── Write to /dev/nand0/
+        ├── "unpack" → extract ULI archives
+        ├── "verify off" → disables integrity check
+        └── Reboot into new firmware
+```
+
+The `/nand0/dnlscriptcrccheck.on` flag file controls whether the RUL performs
+the `bIsFileValid` CRC check. If the file exists on the NAND, the whole-file
+CRC in every `.out` file's trailer must be correct, or the update is rejected.
+
 ### Module Map
 
 The firmware is split across 13 modules plus the bootloader. They communicate
@@ -398,12 +432,17 @@ Offset  Size  Field
 0x1C    4     Compressed payload size (bytes)
 0x20    4     CRC32 of decompressed content (init=0)
 0x24    N     LZO1X compressed payload
-0x24+N  var   Version trailer (e.g. "GM10.8V208")
+0x24+N  var   Version trailer + metadata
+  └── last 4 bytes: CRC32 of entire file minus last 4 bytes
 ```
 
 The compression is **standard LZO1X** — confirmed by successfully decompressing
-all original factory firmware with `python-lzo`. The CRC32 covers the
-**decompressed** content, not the compressed stream.
+all original factory firmware with `python-lzo`. The header CRC32 at offset
+`0x20` covers the **decompressed** content. The trailer's final 4 bytes contain
+a separate **whole-file CRC32** covering everything from byte 0 to byte
+`(file_size - 4)` — this is checked by the RUL Testmanager's `bIsFileValid()`
+function during firmware updates, and files failing this check are rejected
+with "File(s) Tainted".
 
 ### Bootloader File Dispatch
 
@@ -516,6 +555,17 @@ output from any LZO1X compressor variant. This was verified by:
 3. **Full ISO verification suite** — all `.out` files across both variants
    decompress cleanly via native `liblzo2` with CRC32 verification matching
    the values stored in the XOZL headers.
+
+### Whole-File Integrity (bIsFileValid)
+
+Every `.out` file contains a **whole-file CRC32** in the last 4 bytes of its
+trailer. This is computed as `CRC32(file[0 .. file_size-5])` — the CRC of the
+entire file excluding the CRC itself. This check is performed by the
+`bIsFileValid()` function in the RUL Testmanager during firmware updates.
+
+If this CRC does not match, the update fails with **"File(s) Tainted"**. The
+`xozl_tool.py pack` command automatically computes and appends the correct
+whole-file CRC when repacking, so patched files will always pass this check.
 
 ### Patch Compatibility
 

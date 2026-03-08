@@ -104,7 +104,7 @@ python3 tools/patch_sd_cid_bypass.py apply /tmp/sysprogosalio.elf /tmp/sysprogos
 # 3. Verify
 python3 tools/patch_sd_cid_bypass.py verify /tmp/sysprogosalio_patched.elf
 
-# 4. Repack into XOZL
+# 4. Repack into XOZL (recomputes both content CRC and whole-file CRC)
 python3 tools/xozl_tool.py pack /tmp/sysprogosalio_patched.elf sysprogosalio_patched.out --ref sysprogosalio.out
 
 # 5. Validate
