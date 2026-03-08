@@ -218,10 +218,11 @@ python3 tools/patch_ipod_auth_retry.py --verify ProcHMI_patched.elf
 
 Documentation: [`tools/docs/patch_ipod_auth_retry_README.md`](tools/docs/patch_ipod_auth_retry_README.md)
 
-### patch_sd_cid_bypass.py — SD Card CID Bypass Patch
+### patch_sd_cid_bypass.py — SD Card CID Bypass Patch (v2)
 
-Applies the SD card CID verification bypass to `sysprogosalio.elf`. A single
-4-byte patch that forces the firmware's built-in "crypt disabled" code path.
+Applies the SD card CID verification bypass to `sysprogosalio.elf`. Two patch
+sites (4 bytes total) that force all code paths through the firmware's built-in
+"crypt disabled" bypass, regardless of whether `cryptmarker.dat` exists on NAND.
 
 ```bash
 python3 tools/patch_sd_cid_bypass.py apply sysprogosalio.elf sysprogosalio_patched.elf
@@ -505,20 +506,25 @@ The firmware checks a `cryptmarker.dat` file on the internal NAND flash and, if
 present, verifies the SD card's CID-based cryptographic signature on every
 card mount.
 
-**Fix:** A surgical 4-byte patch in `sysprogosalio.elf` that forces the
-"crypt disabled" code path, bypassing all CID-based signature verification.
-The patch replaces a single MIPS branch instruction (`bnez`) with a `nop` at
-VMA `0x001925BC`, inside the `vEnableCrypt` function. When the global
-`u32CryptEnabledStatus` is checked, the branch that would enable cryptographic
-verification is neutralized.
+**Fix (v2):** Two surgical patches in `sysprogosalio.elf` that force all
+execution through the firmware's built-in "crypt disabled" code path,
+bypassing all CID-based signature verification regardless of NAND state.
 
 | Location | Description |
 |----------|-------------|
-| `0x001925BC` | `bnez $v0, +0x48` → `nop` (4 bytes changed, 3 non-zero → zero) |
+| `0x00192520` | `beqz $v0` → `beqz $zero` — force "marker not found" path (1 byte) |
+| `0x001925BC` | `bnez $v0, +0x48` → `nop` — bypass crypt-enabled check (3 bytes) |
+
+**Why two sites:** The v1 patch (Site 2 only) was insufficient on units where
+`cryptmarker.dat` exists on NAND (any unit previously paired with an SD card).
+When the marker is present, the firmware takes an alternative code path that
+calls the actual CID verification function at `0x19318c`, completely bypassing
+the v1 patch site. Site 1 forces all execution through the "marker not found"
+path, ensuring Site 2 is always reached.
 
 This causes `fd_crypt_verify_signaturefile` to always return success, regardless
 of which physical SD card is inserted. Full details in:
-[`tools/patch_sd_cid_bypass.py`](tools/patch_sd_cid_bypass.py).
+[`tools/docs/patch_sd_cid_bypass_README.md`](tools/docs/patch_sd_cid_bypass_README.md).
 
 ### Building the Patched ISO
 
