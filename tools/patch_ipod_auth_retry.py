@@ -1,46 +1,44 @@
 #!/usr/bin/env python3
 """
-Patch ProcHMI.elf for MFi authentication retry with crash-safe coordinator
-reset and HMI progress display (v3.2).
+Patch ProcHMI.elf to prevent head unit crash on MFi authentication failure (v4).
 
 Problem:
-  When an iPhone's MFi authentication fails, the firmware gives up without
-  retrying. The error handler's epilog accesses device object pointers that
-  become stale if the cable is unplugged, crashing the head unit. And the
-  user gets no visual feedback that anything is happening.
+  When an iPhone's MFi authentication fails, the firmware's error handler
+  falls through to CALLBACK_EXIT (0x4f0aa0) which accesses the device object
+  pointer at 0x10($s1). If the user then unplugs the cable, the USB removal
+  handler fires while the coordinator holds stale device state, causing a
+  null/stale pointer dereference that reboots the head unit.
 
-Fix (v3.2 — coordinator reset + retry + HMI display):
-  Redirects both auth failure handlers (event=1 "Auth CP Error" and event=2
-  "Authentication Failed") in iPodCtrlCoordinator::onMediaDeviceCallback to a
-  code cave that:
+  Previous attempts (v3.1, v3.2) tried calling firmware functions from within
+  the callback (coordinator reset, DataPool writes). This created inconsistent
+  state between the coordinator (reset to idle) and the USB layer (device still
+  connected), causing a DIFFERENT crash on cable pull.
 
-  Retry path (counter < 3):
-    1. Increments a retry counter at coordinator+0x5CE
-    2. Calls function_4ec608 (the firmware's own coordinator reset function,
-       used during detach/undervoltage recovery)
-    3. Shows "iPod wordt gecontroleerd" on the HMI display via DataPool write
-       (function_987c with DataPool ID 0x5000165, value 1)
-    4. Clears the global "already initialized" flag (g1215 at 0x089985F0)
-    5. Jumps directly to the function epilog at 0x4f0b9c
+Fix (v4 — minimal safe cave, zero function calls):
+  Redirects both auth failure handlers to a 6-instruction code cave that:
+    1. Sets coordinator state to 0x13 (error/terminal) — a known state that
+       the firmware's detach handler handles correctly
+    2. Clears the global "already initialized" flag (g1215 at 0x089985F0)
+       so the next plug-in gets a fresh initialization
+    3. Jumps directly to the function epilog at 0x4f0b9c
 
-    The coordinator is now in a clean idle state. The firmware's timer chain
-    (Timer 2 @ 2s / Timer 1 @ 5s) re-detects the still-connected USB device,
-    triggers fresh initialization, and attempts MFi auth again — while the
-    user sees "iPod wordt gecontroleerd" on screen.
+  This approach makes ZERO function calls from callback context. The
+  coordinator stays in a consistent state: connected=1, valid IAP/device
+  pointers, state=error. When the cable is pulled, the detach handler sees
+  a connected coordinator in error state with valid pointers and cleans up
+  normally.
 
-  Give-up path (counter >= 3):
-    1. Resets the retry counter (ready for next device session)
-    2. Hides the loading overlay via DataPool write (value 0)
-    3. Sets coordinator state to 0x13 (error/terminal)
-    4. Jumps directly to the function epilog
-
-  All paths bypass CALLBACK_EXIT entirely — no device pointer is ever
-  accessed, preventing the stale-pointer crash on cable disconnect.
+  What was learned from v3.1/v3.2:
+    - function_4ec608 (coordinator reset) clears coordinator+5 (connected
+      flag) which prevents Timer 2 from re-triggering init — retry never fires
+    - Calling functions from callback context risks leaving the coordinator
+      in a state inconsistent with the USB layer, causing crashes on unplug
+    - The safest approach is to modify only state fields and return
 
 Patch Sites:
   0x004f0714: event=1 handler -> jump to code cave (replaces 3 instructions)
   0x004f077c: event=2 handler -> jump to code cave (replaces 3 instructions)
-  0x009a87a0: code cave (24 instructions / 96 bytes in .fini/.rodata gap)
+  0x009a87a0: code cave (6 instructions / 24 bytes in .fini/.rodata gap)
 
 Usage:
   python3 patch_ipod_auth_retry.py <input.elf> <output.elf>
@@ -87,38 +85,28 @@ CODE_CAVE       = 0x009A87A0
 PATCH1_ADDR     = 0x004F0714
 PATCH2_ADDR     = 0x004F077C
 EPILOG_RETURN   = 0x004F0B9C  # register restore + jr $ra + sp cleanup
-COORD_RESET_FN  = 0x004EC608  # firmware's own coordinator reset function
-DATAPOOL_WRITE  = 0x0000987C  # function_987c: DataPool property write
-DATAPOOL_LOAD   = 0x05000165  # DataPool ID for iPod "loading" overlay
 INIT_FLAG_ADDR  = 0x089985F0  # "already initialized" global flag (g1215)
-RETRY_OFFSET    = 0x5CE       # unused byte in coordinator object
 ERROR_STATE     = 0x13        # coordinator state machine error state
-MAX_RETRIES     = 3           # auth attempts before giving up
 
 ORIGINAL_PATCH1 = bytes.fromhex("6000228e1300422805004050")
 ORIGINAL_PATCH2 = bytes.fromhex("6000228e13004228f4ff4050")
 
 
 def build_cave() -> bytes:
-    """Build the v3.2 code cave — coordinator reset + retry + HMI display.
+    """Build the v4 code cave — minimal safe error handling, zero function calls.
 
-    Layout (24 instructions, 96 bytes):
-      [0-3]   Retry check: load counter, compare < MAX_RETRIES, branch
-      [4-14]  Retry path:  increment counter, call coordinator reset,
-              show "iPod wordt gecontroleerd" via DataPool, clear g1215,
-              jump to epilog
-      [15-23] Give-up path: reset counter, hide loading overlay via DataPool,
-              set state=19, jump to epilog
+    Layout (6 instructions, 24 bytes):
+      [0] Set v0 = 0x13 (error state)
+      [1] Store to coordinator+0x60 (state field)
+      [2] Load g1215 address high half
+      [3] Clear g1215 (allows fresh init on next plug-in)
+      [4] Jump to epilog (register restore + jr $ra)
+      [5] Set return value = 1 (delay slot)
 
-    Calls the firmware's own coordinator reset function (0x4ec608) which
-    properly clears all internal fields (state, connected flag, deck status,
-    etc.) — the same function used during iPod detach and undervoltage recovery.
-
-    Shows/hides the "iPod wordt gecontroleerd" HMI overlay via the DataPool
-    write function (0x987c) with DataPool ID 0x5000165.
-
-    Does NOT call iPod_cmd_disconnect — avoids tearing down the device object.
-    Bypasses CALLBACK_EXIT entirely — no code touches the device pointer.
+    Makes ZERO function calls. The coordinator stays in a consistent state:
+    coordinator+5 (connected) is still 1, IAP/device pointers are still valid,
+    state = 0x13. When the cable is pulled, the detach handler sees a connected
+    coordinator in error state with valid pointers and cleans up normally.
     """
     cave = bytearray()
 
@@ -128,38 +116,12 @@ def build_cave() -> bytes:
         hi = (hi + 1) & 0xFFFF
         lo = lo - 0x10000
 
-    dp_hi = (DATAPOOL_LOAD >> 16) & 0xFFFF
-    dp_lo = DATAPOOL_LOAD & 0xFFFF
-
-    # --- Retry check (instructions 0-3) ---
-    cave += LBU("v0", RETRY_OFFSET, "s1")     # 0: load retry counter
-    cave += SLTIU("v1", "v0", MAX_RETRIES)    # 1: v1 = (counter < 3)
-    cave += BEQZ("v1", 12)                    # 2: if >= 3 → give_up @15
-    cave += ADDIU("v0", "v0", 1)              # 3: increment (delay slot)
-
-    # --- Retry path (instructions 4-14) ---
-    cave += SB("v0", RETRY_OFFSET, "s1")      # 4: save incremented counter
-    cave += JAL(COORD_RESET_FN)                # 5: call firmware's coordinator reset
-    cave += MOVE("a0", "s1")                   # 6: (delay slot) coordinator ptr
-    cave += LUI("a0", dp_hi)                  # 7: DataPool ID high bits
-    cave += ADDIU("a0", "a0", dp_lo)          # 8: a0 = 0x05000165
-    cave += JAL(DATAPOOL_WRITE)                # 9: show "iPod wordt gecontroleerd"
-    cave += ADDIU("a1", "zero", 1)            # 10: (delay slot) value = 1 (show)
-    cave += LUI("v0", hi)                     # 11: g1215 addr high
-    cave += SB("zero", lo, "v0")              # 12: clear g1215 → allows fresh init
-    cave += J(EPILOG_RETURN)                   # 13: jump to register restore + return
-    cave += ADDIU("v0", "zero", 1)            # 14: delay slot: return value = 1
-
-    # --- Give-up path (instructions 15-23) ---
-    cave += SB("zero", RETRY_OFFSET, "s1")    # 15: reset counter for next session
-    cave += LUI("a0", dp_hi)                  # 16: DataPool ID high bits
-    cave += ADDIU("a0", "a0", dp_lo)          # 17: a0 = 0x05000165
-    cave += JAL(DATAPOOL_WRITE)                # 18: hide loading overlay
-    cave += MOVE("a1", "zero")                 # 19: (delay slot) value = 0 (hide)
-    cave += ADDIU("v0", "zero", ERROR_STATE)  # 20: v0 = 19
-    cave += SW("v0", 0x60, "s1")              # 21: coordinator state = error
-    cave += J(EPILOG_RETURN)                   # 22: jump to register restore + return
-    cave += ADDIU("v0", "zero", 1)            # 23: delay slot: return value = 1
+    cave += ADDIU("v0", "zero", ERROR_STATE)  # 0: v0 = 19 (error state)
+    cave += SW("v0", 0x60, "s1")              # 1: coordinator state = error
+    cave += LUI("v0", hi)                     # 2: g1215 address high
+    cave += SB("zero", lo, "v0")              # 3: clear g1215 for next session
+    cave += J(EPILOG_RETURN)                   # 4: jump to register restore + return
+    cave += ADDIU("v0", "zero", 1)            # 5: delay slot: return value = 1
 
     return bytes(cave)
 
